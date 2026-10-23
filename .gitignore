@@ -3,3 +3,6 @@ __pycache__/
 error.log
 lmarena_*.png
 open_apps_report_*.txt
+
+# فایل‌های دانلودشده از گوگل درایو (موقت)
+google_drive/
