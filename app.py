@@ -187,9 +187,9 @@ CODES_FOLDER_NAME = "CODES"
 # تنظیمات پیش‌فرض — همه چیز دستی است تا خودت روشنش کنی
 DEFAULT_SETTINGS = {
     "auto": False,          # یک کلید: خودکار یا دستی
-    "collab_owner": "",     # مالک مخزن ایجنت همکار
-    "collab_repo": "",      # نام مخزن ایجنت همکار
-    "collab_branch": "",    # شاخه‌ای که بررسی می‌شود
+    "collab_owner": "soheylfriend-MAJIDgit",                     # مالک مخزن ایجنت همکار
+    "collab_repo": "Windows-Agent-hamkar",                       # نام مخزن ایجنت همکار
+    "collab_branch": "arena/beecb74c-windows-agent-hamkar",      # شاخه‌ای که بررسی می‌شود
 }
 
 # ------------------------------------------------------------------
