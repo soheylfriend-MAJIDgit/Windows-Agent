@@ -52,6 +52,11 @@ Windows-Agent/
 
 ## رابط کاربری (pygame)
 
+![صفحه عملیات](docs/screenshot-main.png)
+![کتابخانه کدها](docs/screenshot-library.png)
+![ایجنت همکار](docs/screenshot-collab.png)
+
+
 همه اجزا با pygame کشیده می‌شوند — نه Tkinter.
 
 - **گرافیک برداری**: کارت‌های گرد، سایه نرم، هاور، انیمیشن سوییچ
