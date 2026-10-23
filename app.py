@@ -31,7 +31,7 @@ from pathlib import Path
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -52,6 +52,19 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "1.5",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "به‌روزرسانی خودکار برنامه حذف شد — فقط با گیت‌هاب دسکتاپ",
+            "تب «عملیات» به «مغز ایجنت» تغییر نام داد",
+            "هشت تب در دو ردیف: مغز ایجنت، ایجنت مادر، ایجنت همکار، ایجنت مدیریت، کتابخانه کدها، اسکرین‌شات‌ها، گزارش زنده، تغییرات",
+            "دکمه‌های اسکرین‌شات و گزارش از تب اصلی حذف شد",
+            "نام و لوگو: «ایجنت ویندوز» با نشان «پنل ویندوز»",
+            "چیپ‌های وضعیت وسط کارت و متن وسط‌چین عمودی شدند",
+            "تب اسکرین‌شات‌ها با پیش‌نمایش تصویرها",
+        ],
+    ),
     (
         "1.4",
         "۱۴۰۵/۰۸/۰۲",
@@ -1357,7 +1370,7 @@ def draw_spinner(surface, center, radius: int, angle: float, color, width: int =
 
 WIN_W, WIN_H = 1160, 800
 HEADER_H = 96
-TABS_H = 66
+TABS_H = 118
 FOOTER_H = 54
 PAD = 20
 
@@ -1365,11 +1378,16 @@ PAD = 20
 FONT_SCALE = 1.55
 
 TABS = [
-    ("main", "عملیات"),
+    ("main", "مغز ایجنت"),
+    ("mother", "ایجنت مادر"),
     ("collab", "ایجنت همکار"),
+    ("manage", "ایجنت مدیریت"),
     ("codes", "کتابخانه کدها"),
+    ("shots", "اسکرین‌شات‌ها"),
+    ("live", "گزارش زنده"),
     ("changes", "تغییرات"),
 ]
+TAB_ROWS = [TABS[:4], TABS[4:]]
 
 
 class App:
@@ -1679,16 +1697,21 @@ class App:
         return 0
 
     def chip(self, x, y, label, active=False, color=None, size=11) -> int:
-        """چیپ گرد؛ عرض مصرف‌شده را برمی‌گرداند."""
-        w = self.fonts.width(label, size, True) + 22
-        rect = pygame.Rect(0, 0, w, 24)
-        rect.topleft = (x, y)
+        """چیپ گرد؛ y مرکز عمودی چیپ است."""
+        text_w = self.fonts.width(label, size, True)
+        w = text_w + 26
+        h = self.fonts.get(size, True).get_height() + 12
+        rect = pygame.Rect(0, 0, w, h)
+        rect.midleft = (x, y)
         col = self.c_(color) if color else self.c_("accent")
         bg = mix(self.c["surface2"], col, 0.22) if active else self.c_("surface2")
         bd = mix(self.c["border_strong"], col, 0.55) if active else self.c_("border")
-        rounded(self.screen, rect, 12, bg)
-        rounded(self.screen, rect, 12, bd, width=1)
-        self.text(label, (rect.centerx, rect.top + 5), size, col if active else self.c_("text_dim"), True, align="center")
+        rounded(self.screen, rect, h // 2, bg)
+        rounded(self.screen, rect, h // 2, bd, width=1)
+        self.text(
+            label, (rect.centerx, rect.centery), size,
+            col if active else self.c_("text_dim"), True, align="center", valign="center",
+        )
         return w
 
     def status_dot(self, x, y, kind: str, label: str, note: str) -> None:
@@ -1713,23 +1736,36 @@ class App:
         pygame.draw.rect(self.screen, self.c_("surface"), rect)
         pygame.draw.line(self.screen, self.c_("border"), (0, HEADER_H - 1), (w, HEADER_H - 1))
 
-        # --- سمت راست: لوگو و نام برنامه ---
-        logo = pygame.Rect(w - PAD - 58, 18, 58, 58)
-        grad = gradient_rect((58, 58), self.c["accent"], self.c["accent_strong"])
-        mask = pygame.Surface((58, 58), pygame.SRCALPHA)
-        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=18)
+        # --- سمت راست: لوگو، نام فارسی و نشان «پنل ویندوز» ---
+        logo = pygame.Rect(w - PAD - 60, 16, 60, 60)
+        grad = gradient_rect((60, 60), self.c["accent"], self.c["accent_strong"])
+        mask = pygame.Surface((60, 60), pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=19)
         grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         self.screen.blit(grad, logo)
         self.text(
-            "WA", (logo.centerx, logo.top + 16), 18,
+            "WA", (logo.centerx, logo.top + 14), 15,
             "#ffffff" if self.theme_name == "light" else self.c_("bg"),
             True, align="center",
         )
 
-        self.text(APP_TITLE, (logo.left - 14, 22), 20, self.c_("text"), True, align="right")
+        brand_right = logo.left - 16
+        self.text("ایجنت ویندوز", (brand_right, 8), 17, self.c_("text"), True, align="right")
+
+        # نشان «پنل ویندوز»
+        badge_text = "پنل ویندوز"
+        badge_w = self.fonts.width(badge_text, 9, True) + 26
+        badge = pygame.Rect(0, 0, badge_w, 24)
+        badge.topright = (brand_right, 44)
+        rounded(self.screen, badge, 12, mix(self.c["surface"], self.c["accent"], 0.18))
+        rounded(self.screen, badge, 12, mix(self.c["border_strong"], self.c["accent"], 0.55), width=1)
+        pygame.draw.circle(self.screen, self.c_("accent"), (badge.left + 11, badge.centery), 3)
+        self.text(badge_text, (badge.right - 9, badge.centery - 7), 9, self.c_("accent"), True, align="right")
+
+        # نسخه و شناسه، پایین‌تر و با فاصله
         self.text(
             f"نسخه {to_fa(APP_VERSION)}  ·  شناسه {build_info()['commit']}",
-            (logo.left - 14, 54), 10, self.c_("text_dim"), align="right",
+            (brand_right, 74), 9, self.c_("text_dim"), align="right",
         )
 
         # --- سمت چپ: ساعت و تاریخ ---
@@ -1767,41 +1803,45 @@ class App:
         bar = pygame.Rect(0, HEADER_H, w, TABS_H)
         pygame.draw.rect(self.screen, self.c_("bg"), bar)
 
-        pills_w = min(760, w - 2 * PAD)
-        pills = pygame.Rect(w - PAD - pills_w, HEADER_H + 11, pills_w, 44)
-        rounded(self.screen, pills, 22, self.c_("surface2"))
-        rounded(self.screen, pills, 22, self.c_("border"), width=1)
-
         self.tab_rects: dict[str, pygame.Rect] = {}
+        pills_w = min(940, w - 2 * PAD)
         gap = 5
-        avail = pills.width - 12 - gap * (len(TABS) - 1)
-        each = avail // len(TABS)
-        x = pills.right - 6 - each
-        for key, label in TABS:
-            rect = pygame.Rect(x, pills.top + 6, each, pills.height - 12)
-            active = key == self.tab
-            hovered = self.hover(rect) and not active
-            if active:
-                rounded(self.screen, rect, 17, self.c_("accent"))
-            elif hovered:
-                rounded(self.screen, rect, 17, lighten(self.c_("surface2"), 0.06))
-            fg = (self.c_("bg") if self.theme_name == "dark" else (255, 255, 255)) if active else (
-                self.c_("text") if hovered else self.c_("text_dim")
-            )
-            self.text(label, (rect.centerx, rect.centery), 13, fg, True, align="center", valign="center")
-            self.tab_rects[key] = rect
-            self.hit(rect, lambda k=key: self.switch_tab(k))
-            x -= each + gap
+        row_h = 42
+        row_gap = 8
+        top = HEADER_H + 9
+
+        for row_index, row in enumerate(TAB_ROWS):
+            pills = pygame.Rect(w - PAD - pills_w, top + row_index * (row_h + row_gap), pills_w, row_h)
+            rounded(self.screen, pills, row_h // 2, self.c_("surface2"))
+            rounded(self.screen, pills, row_h // 2, self.c_("border"), width=1)
+
+            each = (pills.width - 12 - gap * (len(row) - 1)) // len(row)
+            x = pills.right - 6 - each
+            for key, label in row:
+                rect = pygame.Rect(x, pills.top + 5, each, pills.height - 10)
+                active = key == self.tab
+                hovered = self.hover(rect) and not active
+                if active:
+                    rounded(self.screen, rect, 16, self.c_("accent"))
+                elif hovered:
+                    rounded(self.screen, rect, 16, lighten(self.c_("surface2"), 0.06))
+                fg = (
+                    self.c_("bg") if self.theme_name == "dark" else (255, 255, 255)
+                ) if active else (self.c_("text") if hovered else self.c_("text_dim"))
+                self.text(label, (rect.centerx, rect.centery), 13, fg, True, align="center", valign="center")
+                self.tab_rects[key] = rect
+                self.hit(rect, lambda k=key: self.switch_tab(k))
+                x -= each + gap
 
         # شمارنده کدهای اجرانشده داخل تب «کتابخانه کدها»
         pending = sum(1 for item in self.codes_index if not item["ran"])
         if pending and "codes" in self.tab_rects:
             tab_rect = self.tab_rects["codes"]
-            badge = pygame.Rect(0, 0, 22, 18)
+            badge = pygame.Rect(0, 0, 24, 19)
             badge.midright = (tab_rect.right - 6, tab_rect.centery)
             rounded(self.screen, badge, 9, self.c_("warn"))
             self.text(
-                to_fa(str(pending)), (badge.centerx, badge.top + 2), 9,
+                to_fa(str(pending)), (badge.centerx, badge.centery - 8), 9,
                 self.c_("bg"), True, align="center",
             )
 
@@ -1877,16 +1917,17 @@ class App:
     # -------------------------------------------------------- تب «عملیات» ---
 
     def draw_main(self, view, top) -> int:
+        """تب «مغز ایجنت» — مرکز کنترل."""
         w = view.width
         y = top
 
-        # --- کارت حالت خودکار ---
-        card = pygame.Rect(view.left, y, w, 108)
+        # --- کارت حالت اجرا ---
+        card = pygame.Rect(view.left, y, w, 124)
         self.card(card)
-        self.text("حالت اجرا", (card.right - 20, card.top + 14), 11, self.c_("text_dim"), True)
+        self.text("حالت اجرا", (card.right - 22, card.top + 16), 11, self.c_("text_dim"), True)
         self.text(
             "خودکار" if self.settings.get("auto") else "دستی",
-            (card.right - 20, card.top + 40), 20,
+            (card.right - 22, card.top + 44), 20,
             self.c_("accent") if self.settings.get("auto") else self.c_("text"), True,
         )
         hint = (
@@ -1895,67 +1936,90 @@ class App:
             else "هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود؛ برای هر مرحله تأیید می‌گیرد."
         )
         self.text(
-            self.ellipsis(hint, 10, card.width - 420),
-            (card.right - 20, card.bottom - 30), 10, self.c_("text_dim"),
+            self.ellipsis(hint, 10, card.width - 470),
+            (card.right - 22, card.bottom - 34), 10, self.c_("text_dim"),
         )
-
         self.switch(
-            pygame.Rect(card.right - 330, card.centery - 18, 72, 36),
+            pygame.Rect(card.right - 360, card.centery - 19, 76, 38),
             self.settings.get("auto"),
             self.action_toggle_auto,
         )
 
         # تایمر دایره‌ای
+        center = (card.left + 64, card.centery)
         if self.settings.get("auto"):
             remaining = max(0.0, self.auto_next - time.monotonic())
             progress = 1 - remaining / max(1, SYNC_POLL_SECONDS)
-            center = (card.left + 58, card.centery)
             draw_ring(
-                self.screen, center, 30, progress,
+                self.screen, center, 34, progress,
                 self.c_("accent") if remaining > 3 else self.c_("warn"),
-                self.c_("surface2"), width=5,
+                self.c_("surface2"), width=6,
             )
             if self.busy:
-                draw_spinner(self.screen, center, 15, self._spinner, self.c_("accent"))
+                draw_spinner(self.screen, center, 16, self._spinner, self.c_("accent"))
             else:
                 self.text(
                     to_fa(str(int(math.ceil(remaining)))),
-                    (center[0], center[1] - 10), 18, self.c_("text"), True, align="center",
+                    (center[0], center[1] - 12), 17, self.c_("text"), True, align="center",
                 )
                 self.text("ثانیه", (center[0], center[1] + 14), 9, self.c_("text_dim"), align="center")
-        y += card.height + 12
+        else:
+            draw_ring(self.screen, center, 34, 0, self.c_("border"), self.c_("surface2"), width=6)
+            self.text("دستی", (center[0], center[1] - 9), 10, self.c_("text_dim"), True, align="center")
+        y += card.height + 14
 
-        # --- کارت دکمه‌های اصلی ---
-        card = pygame.Rect(view.left, y, w, 108)
+        # --- کارت وضعیت کدها ---
+        pending = sum(1 for item in self.codes_index if not item["ran"])
+        total = len(self.codes_index)
+        done = total - pending
+        card = pygame.Rect(view.left, y, w, 116)
         self.card(card)
-        half = (card.width - 40 - 12) // 2
-        self.button(
-            pygame.Rect(card.right - 20 - half, card.top + 18, half, 72),
-            "گرفتن اسکرین‌شات",
-            self.action_capture,
-            kind="primary", icon="camera", size=14,
-            sub=f"باز کردن {LMARENA_URL.replace('https://www.', '')} و عکس پس از ۵ ثانیه",
-        )
-        self.button(
-            pygame.Rect(card.left + 20, card.top + 18, half, 72),
-            "گزارش برنامه‌های باز",
-            self.action_report,
-            icon="list", size=14,
-            sub="فهرست پنجره‌های باز ویندوز در logs",
-        )
-        y += card.height + 12
+        self.text("کدهای ایجنت همکار", (card.right - 22, card.top + 16), 11, self.c_("text_dim"), True)
 
-        # --- کارت لاگ ---
-        remain = max(180, view.bottom - y - 10)
-        card = pygame.Rect(view.left, y, w, remain)
-        self.card(card)
-        self.text("گزارش زنده", (card.right - 18, card.top + 14), 12, self.c_("text"), True)
+        stats = [
+            ("کل کدها", to_fa(str(total)), "text"),
+            ("اجرا شده", to_fa(str(done)), "ok"),
+            ("در انتظار", to_fa(str(pending)), "warn"),
+        ]
+        sx = card.right - 22
+        for label, value, color in stats:
+            box = pygame.Rect(0, 0, 120, 56)
+            box.topright = (sx, card.top + 40)
+            rounded(self.screen, box, 12, self.c_("surface2"))
+            self.text(value, (box.centerx, box.top + 8), 17, self.c_(color), True, align="center")
+            self.text(label, (box.centerx, box.top + 34), 9, self.c_("text_dim"), align="center")
+            sx -= 132
+
+        self.button(
+            pygame.Rect(card.left + 22, card.top + 24, 200, 46),
+            "بررسی مخزن همکار", self.action_check_collab,
+            kind="primary", icon="download", size=11,
+        )
         self.text(
-            to_fa(str(len(self.log_lines))) + " خط",
-            (card.left + 18, card.top + 15), 10, self.c_("text_dim"), align="left",
+            self.busy or ("آخرین بررسی: " + to_fa(str(len(self.log_lines))) + " رویداد ثبت شده"),
+            (card.left + 240, card.top + 40), 9, self.c_("text_dim"), align="left",
         )
-        self.draw_log(pygame.Rect(card.left + 14, card.top + 42, card.width - 28, card.height - 56))
-        return y + card.height + 10
+        y += card.height + 14
+
+        # --- کارت خلاصه‌ی سیستم ---
+        card = pygame.Rect(view.left, y, w, 176)
+        self.card(card)
+        self.text("وضعیت سیستم", (card.right - 22, card.top + 16), 11, self.c_("text_dim"), True)
+        rows = [
+            ("پوشه کدها", str(get_desktop_dir() / CODES_FOLDER_NAME)),
+            ("خروجی‌ها", str(resolve_report_dir()[0])),
+            ("حالت نمایش", "تاریک" if self.theme_name == "dark" else "روشن"),
+            ("فونت", "وزیرمتن" if (LOCAL_BASE_DIR / "assets/fonts/Vazirmatn-Regular.ttf").is_file() else "سیستمی"),
+        ]
+        yy = card.top + 44
+        for label, value in rows:
+            self.text(label, (card.right - 22, yy), 9, self.c_("text_dim"), True, align="right")
+            self.text(
+                self.ellipsis(value, 9, card.width - 190),
+                (card.left + 22, yy), 9, self.c_("text"), align="left",
+            )
+            yy += 30
+        return y + card.height + 12
 
     def draw_log(self, rect) -> None:
         inner = rect.inflate(-16, -12)
@@ -1994,11 +2058,82 @@ class App:
             self.text(piece, (inner.right, yy), size, color, align="right")
             yy += line_h
 
+    # -------------------------------------------------- تب «ایجنت مادر» ---
+
+    def draw_mother(self, view, top) -> int:
+        """محل ایجنت مادر — فعلاً خالی، آماده برای ساخت بعدی."""
+        y = top
+        card = pygame.Rect(view.left, y, view.width, 210)
+        self.card(card)
+        self.text("ایجنت مادر", (card.right - 24, card.top + 20), 15, self.c_("text"), True)
+        self.text(
+            "این بخش در نسخه‌های بعدی ساخته می‌شود.",
+            (card.right - 24, card.top + 54), 11, self.c_("text_dim"),
+        )
+        box = pygame.Rect(card.left + 24, card.top + 92, card.width - 48, 92)
+        rounded(self.screen, box, 12, self.c_("surface2"))
+        rounded(self.screen, box, 12, self.c_("border"), width=1)
+        for i, line in enumerate(
+            (
+                "اینجا جای ایجنت مادر است: همان ایجنتی که این برنامه را می‌نویسد و نسخه می‌دهد.",
+                "برنامه فعلاً هیچ نسخه‌ای را خودکار از گیت‌هاب نمی‌گیرد — به‌روزرسانی دستی است.",
+            )
+        ):
+            self.text(
+                self.ellipsis(line, 10, box.width - 32),
+                (box.right - 16, box.top + 20 + i * 30), 10, self.c_("text_dim"),
+            )
+        return card.bottom + 12
+
+    # ------------------------------------------------ تب «ایجنت مدیریت» ---
+
+    def draw_manage(self, view, top) -> int:
+        """جای ایجنت مدیریت (وب) — فقط قالب، منطقش بعداً ساخته می‌شود."""
+        y = top
+        card = pygame.Rect(view.left, y, view.width, 236)
+        self.card(card)
+        self.text("ایجنت مدیریت", (card.right - 24, card.top + 20), 15, self.c_("text"), True)
+        self.text(
+            "یک سایت مدیریتی بیرونی که کدهای ایجنت همکار را می‌خواند و می‌تواند دوباره اجرا یا به همکار پرامپت بدهد.",
+            (card.right - 24, card.top + 54), 10, self.c_("text_dim"),
+        )
+
+        chips = [
+            ("مرور کدهای ریپوی همکار", "accent"),
+            ("اجرای دوباره کد", "ok"),
+            ("ارسال پرامپت به ایجنت همکار", "warn"),
+        ]
+        cx = card.right - 24
+        cy = card.top + 92
+        for label, color in chips:
+            w = self.fonts.width(label, 9, True) + 26
+            if cx - w < card.left + 24:
+                cx = card.right - 24
+                cy += 36
+            rect = pygame.Rect(cx - w, cy, w, 28)
+            tone = self.c_(color)
+            rounded(self.screen, rect, 14, mix(self.c["surface2"], tone, 0.16))
+            rounded(self.screen, rect, 14, mix(self.c["border_strong"], tone, 0.5), width=1)
+            self.text(label, (rect.centerx, rect.centery), 9, tone, True, align="center", valign="center")
+            cx -= w + 8
+
+        box = pygame.Rect(card.left + 24, card.top + 140, card.width - 48, 76)
+        rounded(self.screen, box, 12, self.c_("surface2"))
+        rounded(self.screen, box, 12, self.c_("border"), width=1)
+        self.text(
+            "این تب فعلاً فقط قالب است؛ خود سایت مدیریت جدا از این برنامه ساخته می‌شود.",
+            (box.right - 16, box.top + 18), 10, self.c_("text_dim"),
+        )
+        self.text(
+            "رابط مشترک: خواندن کدها از مخزن همکار، اجرای دوباره یک کد و ارسال پرامپت.",
+            (box.right - 16, box.top + 44), 10, self.c_("text_dim"),
+        )
+        return card.bottom + 12
+
     # -------------------------------------------------- تب «ایجنت همکار» ---
 
     def draw_collab(self, view, top) -> int:
         y = top
-        y = self.draw_repo_card(view, y, "mother", "مخزن ایجنت مادر", "نسخه تازه‌ی خود برنامه از این مخزن گرفته می‌شود.")
         y = self.draw_repo_card(view, y, "collab", "مخزن ایجنت همکار", "فایل‌های پایتون این مخزن در CODES ذخیره و اجرا می‌شوند.")
 
         card = pygame.Rect(view.left, y, view.width, 92)
@@ -2115,7 +2250,7 @@ class App:
             self.text(self.ellipsis(meta, 9, card.width - 320), (card.right - 22, card.top + 44), 9, self.c_("text_dim"))
             chips_x = card.left + 84
             for label, color, active in item["chips"]:
-                chips_x += self.chip(chips_x, card.top + 30, label, active=active, color=color) + 6
+                chips_x += self.chip(chips_x, card.centery, label, active=active, color=color) + 8
             y += card.height + 10
         return y + 6
 
@@ -2130,6 +2265,121 @@ class App:
             self.c_("bg") if self.theme_name == "dark" else (255, 255, 255),
         )
         self.hit(rect, lambda: (self.sounds.play("click"), on_click()))
+
+    # ------------------------------------------------ تب «اسکرین‌شات‌ها» ---
+
+    def _scan_shots(self) -> list[dict]:
+        folder = Path(resolve_screenshot_dir()[0])
+        items: list[dict] = []
+        try:
+            files = sorted(
+                (p for p in folder.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg")),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            files = []
+        for path in files[:80]:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            items.append(
+                {
+                    "path": path,
+                    "name": path.name,
+                    "size": human_size(stat.st_size),
+                    "when": f"{jalali_date(tehran_now())} {datetime.fromtimestamp(stat.st_mtime):%H:%M}",
+                }
+            )
+        return items
+
+    def thumb(self, path: Path, size=(176, 104)):
+        """بندانگشتی با کش."""
+        if not hasattr(self, "_thumbs"):
+            self._thumbs = {}
+        key = (str(path), path.stat().st_mtime if path.exists() else 0)
+        if key in self._thumbs:
+            return self._thumbs[key]
+        surf = None
+        try:
+            image = pygame.image.load(str(path))
+            surf = pygame.transform.smoothscale(image, size)
+        except Exception:
+            surf = None
+        if len(self._thumbs) > 60:
+            self._thumbs.clear()
+        self._thumbs[key] = surf
+        return surf
+
+    def draw_shots(self, view, top) -> int:
+        y = top
+        folder = Path(resolve_screenshot_dir()[0])
+        shots = self._scan_shots()
+
+        card = pygame.Rect(view.left, y, view.width, 88)
+        self.card(card)
+        self.text("اسکرین‌شات‌ها", (card.right - 22, card.top + 16), 13, self.c_("text"), True)
+        self.text(
+            self.ellipsis(f"پوشه: {folder}", 9, card.width - 380),
+            (card.right - 22, card.top + 44), 9, self.c_("text_dim"),
+        )
+        self.button(
+            pygame.Rect(card.left + 22, card.top + 26, 150, 40),
+            "باز کردن پوشه", lambda: self.open_path(folder), icon="list", size=10,
+        )
+        self.text(
+            to_fa(str(len(shots))) + " تصویر",
+            (card.left + 186, card.top + 36), 10, self.c_("text_dim"), align="left",
+        )
+        y += card.height + 14
+
+        if not shots:
+            card = pygame.Rect(view.left, y, view.width, 140)
+            self.card(card)
+            self.text("هنوز اسکرین‌شاتی ذخیره نشده", (card.centerx, card.top + 52), 12, self.c_("text_dim"), True, align="center")
+            return card.bottom + 12
+
+        for item in shots:
+            card = pygame.Rect(view.left, y, view.width, 128)
+            self.card(card)
+            pic = self.thumb(item["path"])
+            frame = pygame.Rect(card.right - 22 - 176, card.top + 12, 176, 104)
+            rounded(self.screen, frame, 10, self.c_("surface2"))
+            if pic:
+                self.screen.blit(pic, (frame.x, frame.y))
+            else:
+                self.text("بدون پیش‌نمایش", (frame.centerx, frame.centery - 8), 9, self.c_("text_dim"), align="center")
+            rounded(self.screen, frame, 10, self.c_("border"), width=1)
+
+            self.text(
+                self.ellipsis(item["name"], 11, card.width - 420),
+                (card.right - 220, card.top + 18), 11, self.c_("text"), True,
+            )
+            self.text(item["size"], (card.right - 220, card.top + 48), 9, self.c_("text_dim"))
+            self.button(
+                pygame.Rect(card.left + 22, card.centery - 20, 170, 40),
+                "نمایش تصویر", lambda p=item["path"]: self.open_path(p), icon="camera", size=10,
+            )
+            y += card.height + 12
+        return y + 6
+
+    # ------------------------------------------------- تب «گزارش زنده» ---
+
+    def draw_live(self, view, top) -> int:
+        card = pygame.Rect(view.left, top, view.width, max(260, view.height - 24))
+        self.card(card)
+        self.text("گزارش زنده", (card.right - 22, card.top + 16), 13, self.c_("text"), True)
+        self.text(
+            to_fa(str(len(self.log_lines))) + " خط",
+            (card.left + 22, card.top + 18), 10, self.c_("text_dim"), align="left",
+        )
+        self.button(
+            pygame.Rect(card.left + 22, card.top + 44, 130, 36),
+            "پاک کردن", self.action_clear_log, size=10,
+        )
+        self.draw_log(pygame.Rect(card.left + 14, card.top + 90, card.width - 28, card.height - 104))
+        return card.bottom + 10
 
     # -------------------------------------------------------- تب «تغییرات» ---
 
@@ -2334,6 +2584,21 @@ class App:
             return
         self.sounds.play("run")
         self._start_job("گرفتن گزارش", self._job_report)
+
+    def open_path(self, path) -> None:
+        """باز کردن فایل یا پوشه با برنامه پیش‌فرض ویندوز."""
+        try:
+            if IS_WINDOWS:
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"⚠️ باز کردن ممکن نشد: {exc}")
+
+    def action_clear_log(self) -> None:
+        self.log_lines.clear()
+        self.sounds.play("click")
+        self.toast_msg("گزارش پاک شد")
 
     def action_scan_codes(self) -> None:
         self._scan_codes()
@@ -2599,90 +2864,10 @@ class App:
 
         threading.Thread(target=loop, daemon=True).start()
 
-    # ------------------------------------------------------------ آپدیت ---
+    # ----------------------------------------------- به‌روزرسانی (دستی) ---
 
-    def check_app_update(self, manual: bool = False) -> bool:
-        owner, repo, branch = self.mother_info()
-        data = repo_zip(owner, repo, branch)
-        if not data:
-            self.post(lambda: self._set_status("repo", False, "قطع"))
-            return False
-        version_bytes = extract_file(data, GITHUB_VERSION_FILE)
-        version = version_bytes.decode("utf-8", errors="replace").strip() if version_bytes else "?"
-        self._last_version = version
-        self.post(lambda: self._set_status("repo", True, version[:9]))
-
-        remote = extract_file(data, "app.py")
-        if not remote:
-            return False
-        try:
-            if remote == Path(__file__).resolve().read_bytes():
-                return False
-        except OSError:
-            return False
-
-        def apply() -> None:
-            self._update_app(data, version)
-
-        if manual or self.settings.get("auto"):
-            self.post(lambda: self.modal_ask(
-                "نسخه تازه برنامه",
-                f"نسخه {version} روی مخزن مادر هست.\nنصب شود و برنامه دوباره باز شود؟",
-                apply,
-            ))
-        return True
-
-    def _update_app(self, data: bytes, version: str) -> None:
-        remote = extract_file(data, "app.py")
-        if not remote:
-            return
-        here = Path(__file__).resolve()
-        import py_compile
-        import tempfile
-
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as fh:
-                fh.write(remote.decode("utf-8", errors="replace"))
-                temp_path = fh.name
-            py_compile.compile(temp_path, doraise=True)
-            Path(temp_path).unlink(missing_ok=True)
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"⚠️ نسخه جدید سالم نیست، اعمال نشد: {exc}")
-            self.report_error("نسخه جدید برنامه سالم نبود", traceback.format_exc())
-            return
-
-        try:
-            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            backup = BACKUP_DIR / f"app.backup-{datetime.now():%Y%m%d-%H%M%S}.py"
-            backup.write_bytes(here.read_bytes())
-            here.write_bytes(remote)
-        except OSError as exc:
-            self.log(f"⚠️ نوشتن نسخه جدید ممکن نشد: {exc}")
-            self.report_error("نوشتن نسخه جدید ممکن نشد", str(exc))
-            return
-
-        try:
-            import json
-
-            STAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STAMP_FILE.write_text(
-                json.dumps(
-                    {"version": version, "date": jalali_date(tehran_now()), "time": f"{tehran_now():%H:%M}"},
-                    ensure_ascii=False, indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-
-        self.log(f"🔄 برنامه بروز شد (نسخه {version}) — پشتیبان: {backup.name}")
-        self.log("   راه‌اندازی مجدد…")
-        time.sleep(1.2)
-        try:
-            subprocess.Popen([sys.executable, str(here)])
-        except OSError:
-            pass
-        os._exit(0)
+    def _no_self_update(self) -> None:
+        """برنامه هیچ نسخه‌ای را از گیت‌هاب نمی‌گیرد؛ به‌روزرسانی با گیت‌هاب دسکتاپ است."""
 
     # -------------------------------------------------------- حلقه اصلی ---
 
@@ -2777,9 +2962,9 @@ class App:
                 self._start_job("دور خودکار", self._auto_cycle)
 
     def _auto_cycle(self) -> None:
+        """دور خودکار: فقط گرفتن کدهای همکار و اجرای آن‌ها (بدون دستکاری خود برنامه)."""
         self._job_fetch(manual=False)
         self._job_run_new(manual=False)
-        self.check_app_update(manual=False)
 
 
 # ------------------------------------------------------------------ شروع ---
