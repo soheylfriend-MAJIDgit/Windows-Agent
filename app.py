@@ -31,7 +31,7 @@ from pathlib import Path
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -52,6 +52,17 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "1.4",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "فونت کل برنامه بزرگ‌تر شد (مقیاس ۱.۵۵)",
+            "کلید قطع صدا به بالا-چپ هدر منتقل شد",
+            "نوار تب‌ها از راست چیده می‌شود",
+            "گزارش زنده دوستونه شد: ساعت در چپ، متن راست",
+            "پنجره تأیید به اندازه متن باز می‌شود",
+        ],
+    ),
     (
         "1.3",
         "۱۴۰۵/۰۸/۰۲",
@@ -1186,6 +1197,7 @@ class Fonts:
         return candidate if candidate.is_file() else None
 
     def get(self, size: int, bold: bool = False):
+        size = max(11, int(round(size * FONT_SCALE)))
         key = (size, bold)
         if key not in self.cache:
             path = self._path(bold)
@@ -1343,11 +1355,14 @@ def draw_spinner(surface, center, radius: int, angle: float, color, width: int =
         pygame.draw.line(surface, col, p0, p1, width)
 # ============================================================== رابط کاربری ===
 
-WIN_W, WIN_H = 1060, 730
-HEADER_H = 88
-TABS_H = 60
-FOOTER_H = 48
-PAD = 18
+WIN_W, WIN_H = 1160, 800
+HEADER_H = 96
+TABS_H = 66
+FOOTER_H = 54
+PAD = 20
+
+# بزرگ‌نمایی کلی متن‌ها (برنامه برای خوانایی روی مانیتور معمولی)
+FONT_SCALE = 1.55
 
 TABS = [
     ("main", "عملیات"),
@@ -1553,7 +1568,10 @@ class App:
             icon_w = self.icon(icon, rect.x + 16, rect.centery, 11, fg, align="left")
         label_room = rect.width - 28 - icon_w
         shown = self.ellipsis(label, size, label_room, bold)
-        sub_color = mix(self.c["accent"], self.c["bg"], 0.5) if kind == "primary" else self.c_("text_dim")
+        if kind == "primary":
+            sub_color = mix(self.c["accent"], "#ffffff", 0.62 if self.theme_name == "dark" else 0.75)
+        else:
+            sub_color = self.c_("text_dim")
         if sub:
             self.text(shown, (rect.right - 16, rect.centery - 10), size, fg, bold, align="right")
             self.text(
@@ -1695,40 +1713,44 @@ class App:
         pygame.draw.rect(self.screen, self.c_("surface"), rect)
         pygame.draw.line(self.screen, self.c_("border"), (0, HEADER_H - 1), (w, HEADER_H - 1))
 
-        # لوگو
-        logo = pygame.Rect(PAD, 18, 52, 52)
-        grad = gradient_rect((52, 52), self.c["accent"], self.c["accent_strong"])
-        mask = pygame.Surface((52, 52), pygame.SRCALPHA)
-        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=16)
+        # --- سمت راست: لوگو و نام برنامه ---
+        logo = pygame.Rect(w - PAD - 58, 18, 58, 58)
+        grad = gradient_rect((58, 58), self.c["accent"], self.c["accent_strong"])
+        mask = pygame.Surface((58, 58), pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=18)
         grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         self.screen.blit(grad, logo)
-        self.text("WA", (logo.centerx, logo.top + 16), 16, "#ffffff" if self.theme_name == "light" else self.c_("bg"), True, align="center")
+        self.text(
+            "WA", (logo.centerx, logo.top + 16), 18,
+            "#ffffff" if self.theme_name == "light" else self.c_("bg"),
+            True, align="center",
+        )
 
-        # برند
-        self.text(APP_TITLE, (logo.right + 12, 21), 17, self.c_("text"), True, align="left")
+        self.text(APP_TITLE, (logo.left - 14, 22), 20, self.c_("text"), True, align="right")
         self.text(
             f"نسخه {to_fa(APP_VERSION)}  ·  شناسه {build_info()['commit']}",
-            (logo.right + 12, 46), 10, self.c_("text_dim"), align="left",
+            (logo.left - 14, 54), 10, self.c_("text_dim"), align="right",
         )
 
-        # ساعت و تاریخ
+        # --- سمت چپ: ساعت و تاریخ ---
         now = tehran_now()
         jy, jm, jd = jalali_parts(now)
-        clock_x = w - PAD - 224
-        self.text(f"{to_fa(f'{now:%H:%M:%S}')}", (clock_x, 18), 22, self.c_("text"), True, align="left")
+        clock_x = PAD + 108
+        self.text(f"{to_fa(f'{now:%H:%M:%S}')}", (clock_x, 16), 24, self.c_("text"), True, align="left")
         self.text(
             f"{to_fa(str(jd))} {FA_MONTHS[jm - 1]} {to_fa(str(jy))}",
-            (clock_x, 52), 11, self.c_("text_dim"), align="left",
+            (clock_x, 56), 11, self.c_("text_dim"), align="left",
         )
 
-        # دکمه‌های گوشه
+        # --- دکمه‌های گوشه‌ی چپ (بالا-چپ) ---
         mute_icon = "mute" if self.sounds.muted else "sound"
         self.icon_button(
-            pygame.Rect(w - PAD - 96, 26, 36, 36), mute_icon, self.action_toggle_sound
+            pygame.Rect(PAD, 22, 42, 42), mute_icon, self.action_toggle_sound,
+            active=self.sounds.muted,
         )
         theme_icon = "sun" if self.theme_name == "dark" else "moon"
         self.icon_button(
-            pygame.Rect(w - PAD - 52, 26, 36, 36), theme_icon, self.action_toggle_theme
+            pygame.Rect(PAD + 50, 22, 42, 42), theme_icon, self.action_toggle_theme
         )
 
     def icon_button(self, rect, icon, on_click, *, active=False) -> None:
@@ -1745,27 +1767,28 @@ class App:
         bar = pygame.Rect(0, HEADER_H, w, TABS_H)
         pygame.draw.rect(self.screen, self.c_("bg"), bar)
 
-        pills = pygame.Rect(PAD, HEADER_H + 10, min(620, w - 2 * PAD), 40)
-        rounded(self.screen, pills, 20, self.c_("surface2"))
-        rounded(self.screen, pills, 20, self.c_("border"), width=1)
+        pills_w = min(760, w - 2 * PAD)
+        pills = pygame.Rect(w - PAD - pills_w, HEADER_H + 11, pills_w, 44)
+        rounded(self.screen, pills, 22, self.c_("surface2"))
+        rounded(self.screen, pills, 22, self.c_("border"), width=1)
 
         self.tab_rects: dict[str, pygame.Rect] = {}
-        gap = 4
-        avail = pills.width - 10 - gap * (len(TABS) - 1)
+        gap = 5
+        avail = pills.width - 12 - gap * (len(TABS) - 1)
         each = avail // len(TABS)
-        x = pills.right - 5 - each
+        x = pills.right - 6 - each
         for key, label in TABS:
-            rect = pygame.Rect(x, pills.top + 5, each, pills.height - 10)
+            rect = pygame.Rect(x, pills.top + 6, each, pills.height - 12)
             active = key == self.tab
             hovered = self.hover(rect) and not active
             if active:
-                rounded(self.screen, rect, 16, self.c_("accent"))
+                rounded(self.screen, rect, 17, self.c_("accent"))
             elif hovered:
-                rounded(self.screen, rect, 16, lighten(self.c_("surface2"), 0.06))
+                rounded(self.screen, rect, 17, lighten(self.c_("surface2"), 0.06))
             fg = (self.c_("bg") if self.theme_name == "dark" else (255, 255, 255)) if active else (
                 self.c_("text") if hovered else self.c_("text_dim")
             )
-            self.text(label, (rect.centerx, rect.centery - 8), 12, fg, True, align="center")
+            self.text(label, (rect.centerx, rect.centery), 13, fg, True, align="center", valign="center")
             self.tab_rects[key] = rect
             self.hit(rect, lambda k=key: self.switch_tab(k))
             x -= each + gap
@@ -1788,7 +1811,7 @@ class App:
         pygame.draw.line(self.screen, self.c_("border"), (0, rect.top), (w, rect.top))
 
         y = rect.centery
-        x = PAD + 4
+        x = PAD + 8
         for key, label in (
             ("internet", "اینترنت"),
             ("drive", "گوگل درایو"),
@@ -1800,7 +1823,7 @@ class App:
             self.status_dot(x, y, kind, label, self.status_note.get(key, ""))
             x += 22 + self.fonts.width(label, 10, True) + 8 + self.fonts.width(self.status_note.get(key, ""), 9) + 26
 
-        status_text = self.busy or ("حالت خودکار" if self.settings.get("auto") else "حالت دستی")
+        status_text = (self.busy or ("حالت خودکار" if self.settings.get("auto") else "حالت دستی"))
         self.text(status_text, (w - PAD, y), 10, self.c_("text_dim"), True, align="right", valign="center")
 
     # ---------------------------------------------------------- قاب محتوا ---
@@ -1858,13 +1881,13 @@ class App:
         y = top
 
         # --- کارت حالت خودکار ---
-        card = pygame.Rect(view.left, y, w, 104 if self.settings.get("auto") else 92)
+        card = pygame.Rect(view.left, y, w, 108)
         self.card(card)
-        self.text("حالت اجرا", (card.right - 18, card.top + 16), 13, self.c_("text"), True)
+        self.text("حالت اجرا", (card.right - 20, card.top + 14), 11, self.c_("text_dim"), True)
         self.text(
             "خودکار" if self.settings.get("auto") else "دستی",
-            (card.right - 18, card.top + 40), 22,
-            self.c_("accent") if self.settings.get("auto") else self.c_("text_dim"), True,
+            (card.right - 20, card.top + 40), 20,
+            self.c_("accent") if self.settings.get("auto") else self.c_("text"), True,
         )
         hint = (
             "هر ۱۰ ثانیه مخزن همکار بررسی می‌شود؛ کد تازه خودکار دانلود و اجرا می‌شود."
@@ -1872,13 +1895,12 @@ class App:
             else "هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود؛ برای هر مرحله تأیید می‌گیرد."
         )
         self.text(
-            self.ellipsis(hint, 10, card.width - 330),
-            (card.right - 18, card.top + 68 if self.settings.get("auto") else card.top + 66),
-            10, self.c_("text_dim"),
+            self.ellipsis(hint, 10, card.width - 420),
+            (card.right - 20, card.bottom - 30), 10, self.c_("text_dim"),
         )
 
         self.switch(
-            pygame.Rect(card.right - 300, card.centery - 16, 64, 32),
+            pygame.Rect(card.right - 330, card.centery - 18, 72, 36),
             self.settings.get("auto"),
             self.action_toggle_auto,
         )
@@ -1904,18 +1926,18 @@ class App:
         y += card.height + 12
 
         # --- کارت دکمه‌های اصلی ---
-        card = pygame.Rect(view.left, y, w, 96)
+        card = pygame.Rect(view.left, y, w, 108)
         self.card(card)
-        half = (card.width - 36 - 12) // 2
+        half = (card.width - 40 - 12) // 2
         self.button(
-            pygame.Rect(card.right - 18 - half, card.top + 16, half, 64),
+            pygame.Rect(card.right - 20 - half, card.top + 18, half, 72),
             "گرفتن اسکرین‌شات",
             self.action_capture,
             kind="primary", icon="camera", size=14,
             sub=f"باز کردن {LMARENA_URL.replace('https://www.', '')} و عکس پس از ۵ ثانیه",
         )
         self.button(
-            pygame.Rect(card.left + 18, card.top + 16, half, 64),
+            pygame.Rect(card.left + 20, card.top + 18, half, 72),
             "گزارش برنامه‌های باز",
             self.action_report,
             icon="list", size=14,
@@ -1941,9 +1963,13 @@ class App:
         rounded(self.screen, rect, 12, self.c_("border"), width=1)
 
         size = 10
-        line_h = self.fonts.get(size).get_height() + 2
-        wrapped: list[tuple[str, tuple]] = []
-        for line in self.log_lines[-120:]:
+        stamp_size = 9
+        line_h = self.fonts.get(size).get_height() + 3
+        gutter = self.fonts.width("۰۰:۰۰:۰۰", stamp_size) + 14
+        text_width = inner.width - gutter
+
+        rows: list[tuple[str, str, tuple]] = []
+        for line in self.log_lines[-140:]:
             color = self.c_("text")
             if "❌" in line or "خطا" in line or "⚠️" in line:
                 color = self.c_("danger")
@@ -1951,14 +1977,20 @@ class App:
                 color = self.c_("ok")
             elif "▶️" in line:
                 color = self.c_("accent")
-            for piece in self.fonts.wrap(line, size, inner.width):
-                wrapped.append((piece, color))
+            stamp, _, body = line.partition("  ")
+            if not body:
+                stamp, body = "", line
+            pieces = self.fonts.wrap(body.strip() or " ", size, text_width)
+            for index, piece in enumerate(pieces):
+                rows.append((stamp if index == 0 else "", piece, color))
 
         room = max(1, inner.height // line_h)
-        start = max(0, len(wrapped) - room)
+        start = max(0, len(rows) - room)
         self.screen.set_clip(rect.inflate(0, -6))
         yy = inner.top
-        for piece, color in wrapped[start:]:
+        for stamp, piece, color in rows[start:]:
+            if stamp:
+                self.text(stamp, (inner.left, yy), stamp_size, self.c_("text_dim"), align="left")
             self.text(piece, (inner.right, yy), size, color, align="right")
             yy += line_h
 
@@ -1969,82 +2001,91 @@ class App:
         y = self.draw_repo_card(view, y, "mother", "مخزن ایجنت مادر", "نسخه تازه‌ی خود برنامه از این مخزن گرفته می‌شود.")
         y = self.draw_repo_card(view, y, "collab", "مخزن ایجنت همکار", "فایل‌های پایتون این مخزن در CODES ذخیره و اجرا می‌شوند.")
 
-        card = pygame.Rect(view.left, y, view.width, 82)
+        card = pygame.Rect(view.left, y, view.width, 92)
         self.card(card)
         self.button(
-            pygame.Rect(card.right - 18 - 170, card.top + 18, 170, 46),
+            pygame.Rect(card.right - 20 - 210, card.top + 22, 210, 48),
             "بررسی مخزن همکار", self.action_check_collab,
-            kind="primary", icon="download", size=12,
+            kind="primary", icon="download", size=11,
         )
         self.button(
-            pygame.Rect(card.right - 18 - 170 - 12 - 170, card.top + 18, 170, 46),
+            pygame.Rect(card.right - 20 - 210 - 12 - 200, card.top + 22, 200, 48),
             "اجرای کدهای جدید", self.action_run_new,
-            icon="play", size=12,
+            icon="play", size=11,
         )
-        info = f"حالت {'خودکار' if self.settings.get('auto') else 'دستی'}"
-        if self.busy:
-            info = self.busy
-        self.text(info, (card.left + 18, card.top + 26), 11, self.c_("text_dim"), align="left")
+        info = self.busy or f"حالت {'خودکار' if self.settings.get('auto') else 'دستی'}"
+        self.text(info, (card.left + 20, card.top + 26), 10, self.c_("text_dim"), align="left")
         pending = sum(1 for item in self.codes_index if not item["ran"])
         self.text(
             f"{to_fa(str(pending))} کد اجرانشده",
-            (card.left + 18, card.top + 46), 10, self.c_("warn") if pending else self.c_("text_dim"), align="left",
+            (card.left + 20, card.top + 50), 10,
+            self.c_("warn") if pending else self.c_("text_dim"), align="left",
         )
         y += card.height + 12
 
-        card = pygame.Rect(view.left, y, view.width, 196)
+        card = pygame.Rect(view.left, y, view.width, 214)
         self.card(card)
-        self.text("چطور کار می‌کند", (card.right - 18, card.top + 14), 12, self.c_("text"), True)
+        self.text("چطور کار می‌کند", (card.right - 20, card.top + 16), 12, self.c_("text"), True)
         steps = [
             "۱) ایجنت همکار فایل .py را در مخزن خودش می‌گذارد.",
             "۲) دکمه «بررسی مخزن همکار» فایل‌ها را در پوشه CODES روی دسکتاپ می‌گذارد.",
             "۳) دکمه «اجرای کدهای جدید» آن‌ها را اجرا و نتیجه را در logs گوگل درایو می‌نویسد.",
             "۴) هر کدی که قبلاً اجرا شده، در تب «کتابخانه کدها» با دکمه پخش دوباره قابل اجراست.",
         ]
-        yy = card.top + 44
+        yy = card.top + 48
         for step in steps:
-            self.text(self.ellipsis(step, 11, card.width - 60), (card.right - 18, yy), 11, self.c_("text_dim"))
-            yy += 26
+            self.text(self.ellipsis(step, 10, card.width - 60), (card.right - 20, yy), 10, self.c_("text_dim"))
+            yy += 30
         return y + card.height + 10
 
     def draw_repo_card(self, view, y: int, prefix: str, title: str, hint: str) -> int:
-        card = pygame.Rect(view.left, y, view.width, 158)
+        card = pygame.Rect(view.left, y, view.width, 190)
         self.card(card)
-        self.text(title, (card.right - 18, card.top + 14), 12, self.c_("text"), True)
-        self.text(self.ellipsis(hint, 9, card.width - 60), (card.right - 18, card.top + 36), 9, self.c_("text_dim"))
-        self.button(
-            pygame.Rect(card.left + 18, card.bottom - 52, 92, 34),
-            "ذخیره", lambda p=prefix: self.action_save_repo(p),
-            size=11,
+
+        self.text(title, (card.right - 20, card.top + 16), 12, self.c_("text"), True)
+        self.text(
+            self.ellipsis(hint, 10, card.width - 60),
+            (card.right - 20, card.top + 44), 10, self.c_("text_dim"),
         )
-        labels = (("owner", "مالک"), ("repo", "مخزن"), ("branch", "شاخه"))
-        x = card.right - 18
-        widths = (160, 170, 240)
-        for (key, label), fw in zip(labels, widths):
-            x -= fw + 10
-            field = pygame.Rect(x, card.top + 84, fw, 34)
-            self.text(label, (field.right, card.top + 66), 9, self.c_("text_dim"))
+
+        # ردیف فیلدها (از راست به چپ)
+        labels = (("branch", "شاخه", 300), ("repo", "مخزن", 220), ("owner", "مالک", 220))
+        x = card.right - 20
+        for key, label, width in labels:
+            field = pygame.Rect(x - width, card.top + 92, width, 40)
+            self.text(label, (field.right, card.top + 72), 9, self.c_("text_dim"))
             self.input_field(field, f"{prefix}_{key}")
-        return y + card.height + 12
+            x -= width + 12
+
+        self.button(
+            pygame.Rect(card.right - 20 - 120, card.bottom - 54, 120, 38),
+            "ذخیره", lambda p=prefix: self.action_save_repo(p), size=11,
+        )
+        current = f"{self.settings.get(prefix + '_owner', '')}/{self.settings.get(prefix + '_repo', '')}"
+        self.text(
+            self.ellipsis("فعلی: " + current, 9, card.width - 200),
+            (card.left + 20, card.bottom - 42), 9, self.c_("text_dim"), align="left",
+        )
+        return y + card.height + 14
 
     # -------------------------------------------------- تب «کتابخانه کدها» ---
 
     def draw_codes(self, view, top) -> int:
         y = top
-        card = pygame.Rect(view.left, y, view.width, 72)
+        card = pygame.Rect(view.left, y, view.width, 92)
         self.card(card)
-        self.text("کتابخانه کدها", (card.right - 18, card.top + 14), 13, self.c_("text"), True)
+        self.text("کتابخانه کدها", (card.right - 20, card.top + 16), 13, self.c_("text"), True)
         self.text(
-            f"پوشه: {get_desktop_dir() / CODES_FOLDER_NAME}",
-            (card.right - 18, card.top + 38), 9, self.c_("text_dim"),
+            self.ellipsis(f"پوشه: {get_desktop_dir() / CODES_FOLDER_NAME}", 9, card.width - 340),
+            (card.right - 20, card.top + 44), 9, self.c_("text_dim"),
         )
         self.button(
-            pygame.Rect(card.left + 18, card.top + 18, 120, 36),
-            "به‌روزرسانی", self.action_scan_codes, icon="refresh", size=11,
+            pygame.Rect(card.left + 20, card.top + 24, 165, 44),
+            "به‌روزرسانی", self.action_scan_codes, icon="refresh", size=10,
         )
         self.text(
             to_fa(str(len(self.codes_index))) + " فایل",
-            (card.left + 150, card.top + 30), 10, self.c_("text_dim"), align="left",
+            (card.left + 200, card.top + 34), 10, self.c_("text_dim"), align="left",
         )
         y += card.height + 12
 
@@ -2059,22 +2100,22 @@ class App:
             return y + card.height + 10
 
         for item in self.codes_index:
-            card = pygame.Rect(view.left, y, view.width, 76)
+            card = pygame.Rect(view.left, y, view.width, 88)
             hovered = self.hover(card)
             self.card(card, fill=self.c["surface"] if not hovered else lighten(self.c["surface"], 0.03))
             accent = self.c_("ok") if item["ok"] else (self.c_("danger") if item["ok"] is False else self.c_("border_strong"))
             rounded(self.screen, pygame.Rect(card.right - 4, card.top + 14, 4, card.height - 28), 2, accent)
 
             # دکمه پخش
-            play_rect = pygame.Rect(card.left + 16, card.centery - 19, 38, 38)
+            play_rect = pygame.Rect(card.left + 20, card.centery - 22, 44, 44)
             self.play_button(play_rect, lambda p=item["path"]: self.action_run_single(p))
 
-            self.text(self.ellipsis(item["name"], 12, card.width - 260), (card.right - 20, card.top + 14), 12, self.c_("text"), True)
+            self.text(self.ellipsis(item["name"], 12, card.width - 320), (card.right - 22, card.top + 14), 12, self.c_("text"), True)
             meta = item["meta"]
-            self.text(self.ellipsis(meta, 9, card.width - 260), (card.right - 20, card.top + 40), 9, self.c_("text_dim"))
-            chips_x = card.left + 74
+            self.text(self.ellipsis(meta, 9, card.width - 320), (card.right - 22, card.top + 44), 9, self.c_("text_dim"))
+            chips_x = card.left + 84
             for label, color, active in item["chips"]:
-                chips_x += self.chip(chips_x, card.top + 26, label, active=active, color=color) + 6
+                chips_x += self.chip(chips_x, card.top + 30, label, active=active, color=color) + 6
             y += card.height + 10
         return y + 6
 
@@ -2177,14 +2218,24 @@ class App:
         self.screen.blit(veil, (0, 0))
 
         modal = self.modal or {}
-        box = pygame.Rect(0, 0, min(560, w - 80), 250)
+
+        # اندازه‌ی جعبه بر اساس طول متن
+        box_w = min(640, w - 80)
+        text_w = box_w - 48
+        line_h = self.fonts.get(11).get_height() + 3
+        lines: list[str] = []
+        for raw in str(modal.get("text", "")).split("\n"):
+            lines.extend(self.fonts.wrap(raw, 11, text_w) if raw.strip() else [""])
+        box_h = 78 + max(60, len(lines) * line_h) + 76
+
+        box = pygame.Rect(0, 0, box_w, box_h)
         box.center = (w // 2, h // 2)
         shadow(self.screen, box, 18, spread=16, alpha=90)
         rounded(self.screen, box, 18, self.c_("surface"))
         rounded(self.screen, box, 18, self.c_("border_strong"), width=1)
 
         self.text(modal.get("title", ""), (box.right - 24, box.top + 20), 14, self.c_("text"), True)
-        text_rect = pygame.Rect(box.left + 24, box.top + 52, box.width - 48, box.height - 130)
+        text_rect = pygame.Rect(box.left + 24, box.top + 56, box.width - 48, box.height - 132)
         self.paragraph(modal.get("text", ""), text_rect, 11, self.c_("text_dim"))
 
         self.button(
