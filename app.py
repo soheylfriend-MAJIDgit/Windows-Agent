@@ -982,6 +982,8 @@ class AgentApp:
             + ("روشن" if self.settings["auto_fetch"] else "خاموش")
             + " | اجرای خودکار: "
             + ("روشن" if self.settings["auto_run"] else "خاموش")
+            + " | آپدیت برنامه: "
+            + ("روشن" if self.settings["auto_update_app"] else "خاموش")
         )
         self.log("   برای گرفتن کدها دکمه «بررسی و دریافت کد» را بزنید.")
         self.log(f"منبع کد: {GITHUB_OWNER}/{GITHUB_REPO} @ {GITHUB_BRANCH}")
