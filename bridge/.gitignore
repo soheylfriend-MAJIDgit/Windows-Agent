@@ -1,0 +1,7 @@
+state.json
+status.txt
+watcher.log
+PAUSE.txt
+out/
+codes/done/
+*_result.txt
