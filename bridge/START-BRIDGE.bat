@@ -2,6 +2,7 @@
 setlocal
 cd /d "%~dp0"
 title Arena Bridge
+set "BRIDGE_BASE=%~dp0"
 
 rem ---------------------------------------------------------------
 rem  Arena Bridge launcher

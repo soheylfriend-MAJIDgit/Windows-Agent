@@ -36,10 +36,8 @@ from pathlib import Path
 # ---------------------------------------------------------------- تنظیمات ---
 
 # مسیر ریشه در گوگل درایو (قابل تغییر با متغیر محیطی BRIDGE_BASE برای تست)
-BASE = Path(
-    os.environ.get("BRIDGE_BASE")
-    or r"C:\Users\alibatel\My Drive\Windows-Agent-DB\bridge"
-)
+# ریشه = پوشه‌ای که خود ناظر داخلش است (قابل تغییر با متغیر محیطی BRIDGE_BASE)
+BASE = Path(os.environ.get("BRIDGE_BASE") or Path(__file__).resolve().parent)
 
 CODES = BASE / "codes"           # پوشه ورودی: فایل‌های job_*.py
 DONE = CODES / "done"            # فایل‌های اجراشده اینجا منتقل می‌شوند

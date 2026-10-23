@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۰.۳
+Windows Agent — نسخه ۰.۵
 ------------------------
-یک رابط کاربری خیلی ساده با دو دکمه:
+یک رابط کاربری ساده با دو دکمه و دو تب:
 
-  ۱) باز کردن lmarena در کروم و گرفتن اسکرین‌شات از کل صفحه
-     (ذخیره در پوشه گوگل درایو)
+  ۱) باز کردن lmarena در کروم و گرفتن اسکرین‌شات (ذخیره در گوگل درایو)
   ۲) گرفتن گزارش از برنامه‌های باز ویندوز
+  + تب «آخرین تغییرات» و چراغ‌های وضعیت اینترنت / گوگل درایو
+
+نسخه، هش کامیت و تاریخ جلالی ساخت در هدر پنجره نمایش داده می‌شود
+تا همیشه مطمئن شوی کدام نسخه در حال اجراست.
 
 نحوه اجرا: فایل run.bat را دوبار کلیک کنید.
 """
@@ -16,21 +19,80 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, ttk
 
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.3"
+APP_VERSION = "0.5"
+
+# ------------------------------------------------------------------
+#  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
+#  این مقادیر «نسخه پشتیبان» هستند تا حتی بدون گیت هم چیزی نمایش داده شود.
+# ------------------------------------------------------------------
+BUILD_COMMIT = "d47c91e"
+BUILD_SUBJECT = "v0.4-dev: Arena Bridge"
+BUILD_DATE_JALALI = "1405/08/01"
+BUILD_TIME_TEHRAN = "23:26"
+
+# منطقه زمانی تهران (بدون وابستگی به تنظیمات ویندوز)
+TEHRAN = timezone(timedelta(hours=3, minutes=30), "Tehran")
+
+# فاصله‌ی بررسی چراغ‌های وضعیت (ثانیه)
+STATUS_CHECK_SECONDS = 5
+
+# ------------------------------------------------------------------
+#  تاریخچه تغییرات (تب «آخرین تغییرات»)
+# ------------------------------------------------------------------
+CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "0.5",
+        "۱۴۰۵/۰۸/۰۱",
+        [
+            "نمایش نسخه، هش کامیت و تاریخ ساخت (جلالی + ساعت تهران) در هدر",
+            "تب جدید «آخرین تغییرات» برای دیدن تاریخچه در خود برنامه",
+            "چراغ وضعیت اینترنت و چراغ وضعیت اتصال گوگل درایو",
+            "نام فایل‌ها با تاریخ جلالی و ساعت تهران",
+            "حذف پنجره‌های تکراری در گزارش برنامه‌های باز",
+            "فیلتر کردن خود برنامه از فهرست پنجره‌ها",
+        ],
+    ),
+    (
+        "0.3",
+        "۱۴۰۵/۰۸/۰۱",
+        [
+            "اسکرین‌شات‌ها در My Drive/Windows-Agent-DB/ScreenShots",
+            "گزارش‌ها در My Drive/Windows-Agent-DB/logs",
+            "اگر گوگل درایو نبود، ذخیره موقت روی دسکتاپ با هشدار",
+        ],
+    ),
+    (
+        "0.2",
+        "۱۴۰۵/۰۸/۰۱",
+        [
+            "کاهش زمان انتظار از ۱۰ به ۵ ثانیه",
+            "ذخیره در گوگل درایو به‌جای دسکتاپ",
+        ],
+    ),
+    (
+        "0.1",
+        "۱۴۰۵/۰۸/۰۱",
+        [
+            "نسخه اول: باز کردن lmarena در کروم و گرفتن اسکرین‌شات",
+            "گزارش برنامه‌های باز ویندوز",
+        ],
+    ),
+]
 
 LMARENA_URL = "https://lmarena.ai"
 
@@ -60,6 +122,123 @@ IS_WINDOWS = os.name == "nt"
 
 # مسیر فایل خطاها (کنار خود برنامه) تا اگر برنامه بالا نیامد دلیلش معلوم شود
 ERROR_LOG = Path(__file__).resolve().parent / "error.log"
+
+
+# ------------------------------------------------------ تاریخ جلالی / تهران ---
+
+FA_MONTHS = [
+    "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+]
+
+FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def to_fa(value: str) -> str:
+    """تبدیل رقم‌های لاتین به فارسی برای نمایش."""
+    return str(value).translate(FA_DIGITS)
+
+
+def gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
+    """تبدیل تاریخ میلادی به جلالی (بدون هیچ کتابخانه بیرونی)."""
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    gy2, gm2, gd2 = gy - 1600, gm - 1, gd - 1
+    g_day_no = (
+        365 * gy2 + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400
+    )
+    g_day_no += g_d_m[gm2] + gd2
+    if gm > 2 and ((gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0):
+        g_day_no += 1
+    j_day_no = g_day_no - 79
+    j_np = j_day_no // 12053
+    j_day_no %= 12053
+    jy = 979 + 33 * j_np + 4 * (j_day_no // 1461)
+    j_day_no %= 1461
+    if j_day_no >= 366:
+        jy += (j_day_no - 1) // 365
+        j_day_no = (j_day_no - 1) % 365
+    if j_day_no < 186:
+        jm, jd = 1 + j_day_no // 31, 1 + j_day_no % 31
+    else:
+        jm, jd = 7 + (j_day_no - 186) // 30, 1 + (j_day_no - 186) % 30
+    return jy, jm, jd
+
+
+def tehran_now() -> datetime:
+    """زمان فعلی تهران؛ مستقل از منطقه زمانی تنظیم‌شده در ویندوز."""
+    return datetime.now(TEHRAN)
+
+
+def jalali_parts(dt: datetime) -> tuple[int, int, int]:
+    return gregorian_to_jalali(dt.year, dt.month, dt.day)
+
+
+def jalali_date(dt: datetime) -> str:
+    """۱۴۰۵/۰۸/۰۱"""
+    jy, jm, jd = jalali_parts(dt)
+    return f"{jy:04d}/{jm:02d}/{jd:02d}"
+
+
+def jalali_long(dt: datetime) -> str:
+    """۱ آبان ۱۴۰۵"""
+    jy, jm, jd = jalali_parts(dt)
+    return f"{jd} {FA_MONTHS[jm - 1]} {jy}"
+
+
+def jalali_stamp(dt: datetime) -> str:
+    """۱۴۰۵-۰۸-۰۱_۲۳-۵۰-۱۲ برای نام فایل."""
+    jy, jm, jd = jalali_parts(dt)
+    return f"{jy:04d}-{jm:02d}-{jd:02d}_{dt:%H-%M-%S}"
+
+
+def build_info() -> dict:
+    """اطلاعات ساخت: اگر مخزن گیت موجود باشد از آن، وگرنه از مقادیر ثابت."""
+    info = {
+        "commit": BUILD_COMMIT,
+        "subject": BUILD_SUBJECT,
+        "date": BUILD_DATE_JALALI,
+        "time": BUILD_TIME_TEHRAN,
+        "dirty": False,
+        "source": "embedded",
+    }
+    base = Path(__file__).resolve().parent
+    if not (base / ".git").exists():
+        # بدون گیت: زمان ویرایش خود فایل را نشان می‌دهیم
+        try:
+            mtime = datetime.fromtimestamp(Path(__file__).stat().st_mtime, TEHRAN)
+            info.update(date=jalali_date(mtime), time=f"{mtime:%H:%M}")
+        except OSError:
+            pass
+        return info
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(base), "log", "-1", "--format=%h%x1f%ct%x1f%s"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            creationflags=(subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0),
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            commit, epoch, subject = out.stdout.strip().split("\x1f", 2)
+            moment = datetime.fromtimestamp(int(epoch), TEHRAN)
+            info.update(
+                commit=commit.strip(),
+                subject=subject.strip()[:70],
+                date=jalali_date(moment),
+                time=f"{moment:%H:%M}",
+                source="git",
+            )
+        status = subprocess.run(
+            ["git", "-C", str(base), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            creationflags=(subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0),
+        )
+        info["dirty"] = bool(status.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return info
 
 
 # ------------------------------------------------------------ ابزار ویندوز ---
@@ -230,7 +409,7 @@ def take_screenshot(dest_dir: Path) -> Path:
     from PIL import ImageGrab
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    stamp = jalali_stamp(tehran_now())
     target = dest_dir / f"{SCREENSHOT_PREFIX}_{stamp}.png"
 
     try:
@@ -283,6 +462,7 @@ def collect_open_windows() -> list[dict]:
     _prepare_windows_api()
     user32 = ctypes.windll.user32
     windows: list[dict] = []
+    seen: set[tuple[int, str]] = set()
     enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
     def _callback(hwnd, _lparam):
@@ -303,13 +483,21 @@ def collect_open_windows() -> list[dict]:
 
         pid = ctypes.c_ulong()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        windows.append(
-            {
-                "title": title,
-                "pid": pid.value,
-                "process": _process_name(pid.value),
-            }
-        )
+        process = _process_name(pid.value)
+
+        # خود برنامه را در گزارش نیاور
+        if process.lower() in {"python.exe", "pythonw.exe", "py.exe"} and (
+            "Windows Agent" in title
+        ):
+            return True
+
+        # پنجره‌های کاملاً تکراری (همان PID و همان عنوان) را یک بار بشمار
+        key = (pid.value, title)
+        if key in seen:
+            return True
+        seen.add(key)
+
+        windows.append({"title": title, "pid": pid.value, "process": process})
         return True
 
     user32.EnumWindows(enum_proc(_callback), 0)
@@ -318,7 +506,11 @@ def collect_open_windows() -> list[dict]:
 
 
 def format_windows_report(windows: list[dict]) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = tehran_now()
+    now_text = (
+        f"{jalali_long(now)} — {now:%H:%M:%S} "
+        f"(جلالی {jalali_date(now)} | ساعت تهران)"
+    )
 
     counts: dict[str, int] = {}
     for window in windows:
@@ -327,7 +519,7 @@ def format_windows_report(windows: list[dict]) -> str:
     lines = [
         "گزارش برنامه‌های باز ویندوز",
         "=" * 60,
-        f"تاریخ: {now}",
+        f"تاریخ: {now_text}",
         f"تعداد پنجره‌های قابل مشاهده: {len(windows)}",
         "",
         "خلاصه بر اساس برنامه:",
@@ -353,10 +545,57 @@ def format_windows_report(windows: list[dict]) -> str:
 
 def save_report(report_text: str, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    stamp = jalali_stamp(tehran_now())
     target = dest_dir / f"open_apps_report_{stamp}.txt"
     target.write_text(report_text, encoding="utf-8-sig")
     return target
+
+
+# -------------------------------------------------- بررسی وضعیت اتصال‌ها ---
+
+def check_internet(timeout: float = 1.5) -> bool:
+    """آیا به اینترنت دسترسی هست؟ (اتصال مستقیم تست می‌شود، بدون درخواست وب)"""
+    try:
+        sock = socket.create_connection(("8.8.8.8", 53), timeout=timeout)
+        sock.close()
+        return True
+    except OSError:
+        pass
+    try:
+        socket.gethostbyname("www.google.com")
+        return True
+    except OSError:
+        return False
+
+
+def check_google_drive() -> tuple[bool, str]:
+    """آیا گوگل درایو (Drive for Desktop) وصل است؟"""
+    options = [Path(DRIVE_BASE_DIR)]
+    home_drive = Path.home() / "My Drive"
+    options.append(home_drive)
+
+    for path in options:
+        try:
+            if path.is_dir():
+                return True, f"مسیر در دسترس است"
+        except OSError:
+            continue
+
+    if IS_WINDOWS:
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq GoogleDriveFS.exe", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if "GoogleDriveFS" in out.stdout:
+                return False, "برنامه Drive باز است ولی مسیر My Drive پیدا نشد"
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    return False, "در دسترس نیست"
 
 
 # ------------------------------------------------------------ رابط کاربری ---
@@ -367,7 +606,7 @@ class AgentApp:
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.busy = False
 
-        root.title(f"{APP_TITLE} — نسخه {APP_VERSION}")
+        root.title(f"{APP_TITLE} — نسخه {APP_VERSION} ({build_info()['commit']})")
         root.geometry("760x560")
         root.minsize(640, 460)
         root.configure(bg="#f4f6fb")
@@ -378,10 +617,17 @@ class AgentApp:
 
         self._build_ui()
         self.root.after(120, self._drain_log_queue)
+        self._start_status_monitor()
 
-        self.log("به Windows Agent خوش آمدید.")
+        self.log(f"به Windows Agent خوش آمدید — نسخه {APP_VERSION}")
+        self.log(
+            f"نسخه در حال اجرا: کامیت {self.build['commit']} "
+            f"| تاریخ ساخت {self.build['date']} ساعت {self.build['time']} تهران"
+        )
+        self.log(f"فایل در حال اجرا: {Path(__file__).resolve()}")
         self.log("دکمه اول: باز کردن lmarena در کروم و گرفتن اسکرین‌شات.")
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
+        self.log("تب «آخرین تغییرات» تاریخچه نسخه‌ها را نشان می‌دهد.")
         self.log("")
 
         shots_dir, shots_ok = resolve_screenshot_dir()
@@ -410,8 +656,13 @@ class AgentApp:
     # --- ساخت رابط -----------------------------------------------------------
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self.root, bg="#1f2a44", pady=16)
+        self.build = build_info()
+        bg = "#f4f6fb"
+
+        # ---------------------------- هدر ----------------------------
+        header = tk.Frame(self.root, bg="#1f2a44", pady=12)
         header.pack(fill="x")
+
         tk.Label(
             header,
             text="🤖  Windows Agent",
@@ -419,16 +670,71 @@ class AgentApp:
             fg="white",
             bg="#1f2a44",
         ).pack()
+
+        stamp = (
+            f"نسخه {to_fa(APP_VERSION)}  ·  کامیت {self.build['commit']}"
+            f"{' (تغییرات ذخیره‌نشده)' if self.build['dirty'] else ''}"
+        )
         tk.Label(
             header,
-            text="ابزار ساده‌ی اتوماسیون دسکتاپ ویندوز",
-            font=("Segoe UI", 10),
+            text=stamp,
+            font=("Segoe UI", 11, "bold"),
+            fg="#9ec3ff",
+            bg="#1f2a44",
+        ).pack(pady=(6, 0))
+
+        try:
+            jy, jm, jd = (int(part) for part in self.build["date"].split("/"))
+            long_date = f"{to_fa(jd)} {FA_MONTHS[jm - 1]} {to_fa(jy)}"
+        except (ValueError, IndexError):
+            long_date = self.build["date"]
+        date_line = (
+            f"ساخته‌شده: {long_date} — ساعت {to_fa(self.build['time'])} تهران"
+        )
+        tk.Label(
+            header,
+            text=date_line,
+            font=("Segoe UI", 9),
             fg="#c7d0e4",
             bg="#1f2a44",
-        ).pack(pady=(4, 0))
+        ).pack(pady=(2, 0))
 
-        buttons_frame = tk.Frame(self.root, bg="#f4f6fb", pady=18)
-        buttons_frame.pack(fill="x", padx=18)
+        # ------------------------ نوار چراغ‌ها ------------------------
+        lamps_bar = tk.Frame(self.root, bg="#e8edf7", pady=6)
+        lamps_bar.pack(fill="x")
+
+        self.lamp_internet = self._make_lamp(lamps_bar, "اینترنت")
+        self.lamp_drive = self._make_lamp(lamps_bar, "گوگل درایو")
+
+        tk.Label(
+            lamps_bar,
+            text="وضعیت زنده",
+            font=("Segoe UI", 8),
+            fg="#6b7691",
+            bg="#e8edf7",
+        ).pack(side="right", padx=14)
+
+        # ------------------------- تب‌ها -------------------------
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("TNotebook", background=bg, borderwidth=0)
+        style.configure(
+            "TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(18, 8)
+        )
+
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True, padx=12, pady=(8, 4))
+        self.notebook = notebook
+
+        # ---------- تب ۱: عملیات ----------
+        tab_main = tk.Frame(notebook, bg=bg)
+        notebook.add(tab_main, text="  عملیات  ")
+
+        buttons_frame = tk.Frame(tab_main, bg=bg, pady=12)
+        buttons_frame.pack(fill="x", padx=6)
 
         self.btn_capture = tk.Button(
             buttons_frame,
@@ -461,15 +767,15 @@ class AgentApp:
         self.btn_report.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         log_frame = tk.LabelFrame(
-            self.root,
+            tab_main,
             text="  وضعیت  ",
             font=("Segoe UI", 9, "bold"),
-            bg="#f4f6fb",
+            bg=bg,
             fg="#3b4763",
             bd=1,
             relief="solid",
         )
-        log_frame.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        log_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
         self.log_box = scrolledtext.ScrolledText(
             log_frame,
@@ -481,17 +787,133 @@ class AgentApp:
             padx=10,
             pady=8,
         )
-        self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
+        self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
         self.log_box.configure(state="disabled")
+        self.log_box.tag_configure("fa", font=("Tahoma", 10))
 
+        # ---------- تب ۲: آخرین تغییرات ----------
+        tab_changes = tk.Frame(notebook, bg=bg)
+        notebook.add(tab_changes, text="  آخرین تغییرات  ")
+
+        self.changes_box = scrolledtext.ScrolledText(
+            tab_changes,
+            wrap="word",
+            font=("Tahoma", 10),
+            bg="#ffffff",
+            fg="#1f2a44",
+            relief="flat",
+            padx=14,
+            pady=12,
+        )
+        self.changes_box.pack(fill="both", expand=True, padx=6, pady=6)
+        self.changes_box.insert("end", self._changelog_text())
+        self.changes_box.configure(state="disabled")
+
+        # ------------------------- پاصفحه -------------------------
         footer = tk.Label(
             self.root,
-            text=f"نسخه ۰.۳ — ذخیره در {DRIVE_BASE_DIR}",
-            font=("Segoe UI", 9),
+            text=f"فایل در حال اجرا: {Path(__file__).resolve()}",
+            font=("Segoe UI", 8),
             fg="#6b7691",
-            bg="#f4f6fb",
+            bg=bg,
         )
-        footer.pack(pady=(0, 10))
+        footer.pack(pady=(0, 6))
+
+    # --- چراغ‌های وضعیت ------------------------------------------------------
+
+    def _make_lamp(self, parent, title: str) -> dict:
+        bg = "#e8edf7"
+        box = tk.Frame(parent, bg=bg)
+        box.pack(side="right", padx=10)
+
+        canvas = tk.Canvas(
+            box, width=14, height=14, bg=bg, highlightthickness=0, bd=0
+        )
+        dot = canvas.create_oval(1, 1, 13, 13, fill="#9aa4b8", outline="")
+        canvas.pack(side="right", padx=(4, 0))
+
+        caption = tk.Label(
+            box,
+            text="در حال بررسی…",
+            font=("Segoe UI", 8),
+            bg=bg,
+            fg="#6b7691",
+        )
+        caption.pack(side="right", padx=(6, 0))
+
+        label = tk.Label(
+            box,
+            text=title,
+            font=("Segoe UI", 9, "bold"),
+            bg=bg,
+            fg="#3b4763",
+        )
+        label.pack(side="right")
+
+        return {"canvas": canvas, "dot": dot, "caption": caption}
+
+    def _set_lamp(self, lamp: dict, state: str, text: str = "") -> None:
+        colors = {"ok": "#22a06b", "bad": "#d64545", "wait": "#9aa4b8"}
+        lamp["canvas"].itemconfigure(lamp["dot"], fill=colors.get(state, "#9aa4b8"))
+        if text:
+            lamp["caption"].configure(text=text)
+
+    def _changelog_text(self) -> str:
+        lines = [
+            f"{APP_TITLE} — تاریخچه تغییرات",
+            "=" * 58,
+            f"نسخه در حال اجرا: {APP_VERSION}",
+            f"کامیت: {self.build['commit']} — {self.build['subject']}",
+            f"تاریخ ساخت: {self.build['date']} — ساعت {self.build['time']} تهران",
+            f"منبع اطلاعات ساخت: "
+            f"{'مخزن گیت' if self.build['source'] == 'git' else 'مقدار ثابت داخل فایل'}",
+            f"فایل: {Path(__file__).resolve()}",
+            "",
+        ]
+        for version, date, items in CHANGELOG:
+            lines.append(f"◾ نسخه {version} — {date}")
+            for item in items:
+                lines.append(f"   • {item}")
+            lines.append("")
+        return "\n".join(lines)
+
+    # --- پایش وضعیت اتصال ----------------------------------------------------
+
+    def _start_status_monitor(self) -> None:
+        self.status_queue: queue.Queue[tuple[bool, bool, str]] = queue.Queue()
+
+        def worker() -> None:
+            while True:
+                try:
+                    internet = check_internet()
+                    drive_ok, drive_msg = check_google_drive()
+                    self.status_queue.put((internet, drive_ok, drive_msg))
+                except Exception:
+                    self.status_queue.put((False, False, "خطا در بررسی"))
+                time.sleep(STATUS_CHECK_SECONDS)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._poll_status()
+
+    def _poll_status(self) -> None:
+        try:
+            while True:
+                internet, drive_ok, drive_msg = self.status_queue.get_nowait()
+                self._set_lamp(
+                    self.lamp_internet,
+                    "ok" if internet else "bad",
+                    "وصل" if internet else "قطع",
+                )
+                self._set_lamp(
+                    self.lamp_drive,
+                    "ok" if drive_ok else "bad",
+                    "وصل" if drive_ok else "قطع",
+                )
+                if not drive_ok:
+                    self.lamp_drive["caption"].configure(text=drive_msg[:40])
+        except queue.Empty:
+            pass
+        self.root.after(300, self._poll_status)
 
     # --- لاگ ----------------------------------------------------------------
 
