@@ -34,7 +34,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.8"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -55,6 +55,15 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "0.8",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "پایش پوشه گوگل درایو از طریق لینک عمومی (بدون سینک محلی، بدون تأخیر)",
+            "هر ۱۰ ثانیه فهرست پوشه از سرور گوگل خوانده می‌شود",
+            "کدهای job_*.py که در آن پوشه گذاشته شوند خودکار دانلود و اجرا می‌شوند",
+        ],
+    ),
     (
         "0.7.1",
         "۱۴۰۵/۰۸/۰۲",
@@ -144,6 +153,19 @@ REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
 
 # کدهایی که Arena می‌فرستد  →  ...\Windows-Agent-DB\Codes
 CODES_DIR = DRIVE_BASE_DIR + r"\Codes"
+
+# ------------------------------------------------------------------
+#  پایش پوشه گوگل درایو از طریق لینک عمومی (بدون نیاز به سینک محلی)
+#  لینک: https://drive.google.com/drive/folders/<FOLDER_ID>?usp=sharing
+#  پوشه باید با «هر کسی که لینک را دارد» به اشتراک گذاشته شده باشد.
+# ------------------------------------------------------------------
+DRIVE_PUBLIC_FOLDER_ID = "1N5NXtezeMyogLDceudnTysDPc1yjk9vZ"
+
+# هر چند ثانیه پوشه ابری بررسی شود (سرور گوگل، بدون تأخیر سینک)
+PUBLIC_FOLDER_POLL_SECONDS = 10
+
+# پیشوند فایل‌هایی که از پوشه ابری اجرا می‌شوند
+PUBLIC_JOB_PREFIX = "job_"
 
 # نتیجه اجرای کدها  →  ...\Windows-Agent-DB\out
 OUT_DIR = DRIVE_BASE_DIR + r"\out"
@@ -644,6 +666,73 @@ def save_report(report_text: str, dest_dir: Path) -> Path:
     return target
 
 
+# -------------------------------------- پوشه عمومی گوگل درایو (بدون سینک) ---
+#  فهرست فایل‌ها از نمای عمومی پوشه خوانده می‌شود:
+#    https://drive.google.com/embeddedfolderview?id=<ID>#list
+#  این صفحه HTML ساده است و به هیچ کلید API یا ورود نیاز ندارد؛
+#  فقط پوشه باید «هر کسی که لینک را دارد» باشد.
+
+DRIVE_VIEW_URL = "https://drive.google.com/embeddedfolderview?id={folder}#list"
+DRIVE_DOWNLOAD_URL = "https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def _http_get_bytes(url: str, timeout: float = 15.0) -> tuple[bytes, int]:
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read(), response.status
+    except urllib.error.HTTPError as exc:
+        return b"", exc.code
+    except Exception:
+        return b"", 0
+
+
+def parse_folder_html(html: str) -> list[dict]:
+    """فایل‌های یک صفحه embeddedfolderview را استخراج می‌کند."""
+    import re
+
+    items: list[dict] = []
+    # هر آیتم در بلوکی با id="entry-<FILE_ID>" قرار دارد
+    for block in re.split(r'<div class="flip-entry"', html)[1:]:
+        id_match = re.search(r'id="entry-([A-Za-z0-9_-]{10,})"', block)
+        title_match = re.search(
+            r'class="flip-entry-title">([^<]+)<', block
+        )
+        if not id_match or not title_match:
+            continue
+        items.append(
+            {
+                "id": id_match.group(1),
+                "name": title_match.group(1).strip(),
+            }
+        )
+    return items
+
+
+def drive_public_list(folder_id: str) -> tuple[list[dict], str]:
+    """فهرست فایل‌های پوشه عمومی. خروجی: (فایل‌ها، پیام خطا یا رشته خالی)"""
+    data, status = _http_get_bytes(DRIVE_VIEW_URL.format(folder=folder_id))
+    if status != 200 or not data:
+        return [], f"عدم دسترسی به پوشه ({status or 'شبکه'})"
+    html = data.decode("utf-8", errors="replace")
+    items = parse_folder_html(html)
+    if not items and "flip-entry" not in html and "entry-" not in html:
+        return [], "پوشه خالی است یا دسترسی عمومی ندارد"
+    return items, ""
+
+
+def drive_download_file(file_id: str) -> bytes | None:
+    data, status = _http_get_bytes(DRIVE_DOWNLOAD_URL.format(file_id=file_id))
+    if status == 200 and data and b"<html" not in data[:200].lower():
+        return data
+    return None
+
+
 # ------------------------------------------------ دریافت کد از گیت‌هاب ---
 #  فقط از raw.githubusercontent.com استفاده می‌کنیم تا به محدودیت نرخ
 #  API گیت‌هاب (۶۰ درخواست در ساعت) نخوریم.
@@ -908,6 +997,7 @@ class AgentApp:
         self._start_status_monitor()
         self.start_codes_watcher()
         self.start_github_sync()
+        self.start_public_folder_watcher()
 
         self.log(f"به Windows Agent خوش آمدید — نسخه {APP_VERSION}")
         self.log(
@@ -1000,6 +1090,7 @@ class AgentApp:
         self.lamp_internet = self._make_lamp(lamps_bar, "اینترنت")
         self.lamp_drive = self._make_lamp(lamps_bar, "گوگل درایو")
         self.lamp_github = self._make_lamp(lamps_bar, "گیت‌هاب")
+        self.lamp_folder = self._make_lamp(lamps_bar, "پوشه درایو")
 
         tk.Label(
             lamps_bar,
@@ -1353,6 +1444,69 @@ class AgentApp:
             except OSError as exc:
                 self.log(f"⚠️ ذخیره کد ممکن نشد: {exc}")
 
+    # --- پایش پوشه عمومی گوگل درایو ------------------------------------------
+
+    def start_public_folder_watcher(self) -> None:
+        """هر چند ثانیه فهرست پوشه ابری را از سرور گوگل می‌خواند."""
+        self._public_seen: set[str] = set()
+        self._public_running = True
+        self._public_status_text = "در انتظار اولین بررسی…"
+
+        def loop() -> None:
+            time.sleep(2)
+            while self._public_running:
+                try:
+                    self.scan_public_folder()
+                except Exception as exc:
+                    self._public_status_text = f"خطا: {exc}"
+                time.sleep(PUBLIC_FOLDER_POLL_SECONDS)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def scan_public_folder(self) -> None:
+        folder_id = DRIVE_PUBLIC_FOLDER_ID
+        if not folder_id:
+            return
+
+        items, error = drive_public_list(folder_id)
+        if error:
+            self._public_status_text = f"پوشه: {error}"
+            self._set_lamp(self.lamp_folder, "bad", "خطا")
+            return
+
+        jobs = [
+            item
+            for item in items
+            if item["name"].startswith(PUBLIC_JOB_PREFIX)
+            and item["name"].endswith(".py")
+        ]
+        self._public_status_text = (
+            f"پوشه: {len(items)} فایل — {len(jobs)} کد قابل اجرا"
+        )
+        self._set_lamp(self.lamp_folder, "ok", f"{len(items)} فایل")
+
+        state = load_codes_state()
+        codes_dir = Path(CODES_DIR)
+
+        for item in jobs:
+            name = item["name"]
+            if name in self._public_seen or name in state:
+                self._public_seen.add(name)
+                continue
+
+            content = drive_download_file(item["id"])
+            if content is None:
+                self.log(f"⚠️ دانلود {name} از پوشه ابری ممکن نشد")
+                continue
+
+            try:
+                codes_dir.mkdir(parents=True, exist_ok=True)
+                (codes_dir / name).write_bytes(content)
+                self._public_seen.add(name)
+                self.log(f"📥 کد تازه از پوشه گوگل درایو: {name}")
+            except OSError as exc:
+                self.log(f"⚠️ ذخیره کد ممکن نشد: {exc}")
+
     # --- موتور اجرای کدهای جانبی ---------------------------------------------
 
     def _codes_summary(self) -> str:
@@ -1360,6 +1514,8 @@ class AgentApp:
         lines = [
             "اجراکننده کدهای جانبی",
             "=" * 58,
+            f"پوشه ابری (لینک عمومی): {DRIVE_PUBLIC_FOLDER_ID}",
+            f"وضعیت: {getattr(self, '_public_status_text', '—')}",
             f"پوشه کدها: {CODES_DIR}",
             f"پوشه نتیجه: {OUT_DIR}",
             "",
