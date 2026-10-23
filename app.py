@@ -2088,45 +2088,76 @@ class App:
     # ------------------------------------------------ تب «ایجنت مدیریت» ---
 
     def draw_manage(self, view, top) -> int:
-        """جای ایجنت مدیریت (وب) — فقط قالب، منطقش بعداً ساخته می‌شود."""
+        """جای ایجنت مدیریت (وب) — قالب + اطلاعات دو مخزن."""
         y = top
-        card = pygame.Rect(view.left, y, view.width, 236)
+
+        card = pygame.Rect(view.left, y, view.width, 140)
         self.card(card)
-        self.text("ایجنت مدیریت", (card.right - 24, card.top + 20), 15, self.c_("text"), True)
+        self.text("ایجنت مدیریت", (card.right - 24, card.top + 18), 15, self.c_("text"), True)
         self.text(
-            "یک سایت مدیریتی بیرونی که کدهای ایجنت همکار را می‌خواند و می‌تواند دوباره اجرا یا به همکار پرامپت بدهد.",
-            (card.right - 24, card.top + 54), 10, self.c_("text_dim"),
+            "یک سایت مدیریتی بیرونی که کدهای ایجنت همکار را می‌خواند، دوباره اجرا می‌کند و به همکار پرامپت می‌دهد.",
+            (card.right - 24, card.top + 52), 10, self.c_("text_dim"),
         )
 
         chips = [
             ("مرور کدهای ریپوی همکار", "accent"),
             ("اجرای دوباره کد", "ok"),
             ("ارسال پرامپت به ایجنت همکار", "warn"),
+            ("خواندن گزارش و خطاها", "due"),
         ]
         cx = card.right - 24
-        cy = card.top + 92
+        cy = card.top + 88
         for label, color in chips:
             w = self.fonts.width(label, 9, True) + 26
             if cx - w < card.left + 24:
                 cx = card.right - 24
                 cy += 36
-            rect = pygame.Rect(cx - w, cy, w, 28)
+            rect = pygame.Rect(cx - w, cy, w, 30)
             tone = self.c_(color)
-            rounded(self.screen, rect, 14, mix(self.c["surface2"], tone, 0.16))
-            rounded(self.screen, rect, 14, mix(self.c["border_strong"], tone, 0.5), width=1)
+            rounded(self.screen, rect, 15, mix(self.c["surface2"], tone, 0.16))
+            rounded(self.screen, rect, 15, mix(self.c["border_strong"], tone, 0.5), width=1)
             self.text(label, (rect.centerx, rect.centery), 9, tone, True, align="center", valign="center")
             cx -= w + 8
+        y += card.height + 14
 
-        box = pygame.Rect(card.left + 24, card.top + 140, card.width - 48, 76)
-        rounded(self.screen, box, 12, self.c_("surface2"))
-        rounded(self.screen, box, 12, self.c_("border"), width=1)
+        # --- دو مخزنی که ایجنت مدیریت می‌خواند ---
+        card = pygame.Rect(view.left, y, view.width, 176)
+        self.card(card)
+        self.text("مخزن‌هایی که در اختیار دارد", (card.right - 24, card.top + 16), 11, self.c_("text_dim"), True)
+
+        m_owner, m_repo, m_branch = self.mother_info()
+        c_owner, c_repo, c_branch = self.collab_info()
+        rows = [
+            ("ایجنت مادر (فقط خواندن)", f"{m_owner}/{m_repo}", m_branch, "due"),
+            ("ایجنت همکار (خواندن و نوشتن)", f"{c_owner}/{c_repo}", c_branch, "accent"),
+        ]
+        yy = card.top + 48
+        for title, repo_name, branch, color in rows:
+            tone = self.c_(color)
+            pygame.draw.circle(self.screen, tone, (card.right - 32, yy + 8), 4)
+            self.text(title, (card.right - 46, yy), 10, self.c_("text"), True)
+            self.text(
+                self.ellipsis(f"{repo_name}  ·  {branch}", 9, card.width - 300),
+                (card.left + 24, yy + 2), 9, self.c_("text_dim"), align="left",
+            )
+            yy += 38
+
+        self.text(
+            "برای ساختن این سایت، فایل docs/manager-agent-prompt.md را به ایجنت مدیریت بده.",
+            (card.right - 24, card.bottom - 34), 9, self.c_("warn"),
+        )
+        y += card.height + 14
+
+        # --- قالب فعلی ---
+        card = pygame.Rect(view.left, y, view.width, 92)
+        self.card(card)
         self.text(
             "این تب فعلاً فقط قالب است؛ خود سایت مدیریت جدا از این برنامه ساخته می‌شود.",
-            (box.right - 16, box.top + 18), 10, self.c_("text_dim"),
+            (card.right - 24, card.top + 22), 10, self.c_("text_dim"),
         )
         self.text(
-            "رابط مشترک: خواندن کدها از مخزن همکار، اجرای دوباره یک کد و ارسال پرامپت.",
-            (box.right - 16, box.top + 44), 10, self.c_("text_dim"),
+            "رابط مشترک: خواندن کدها از مخزن همکار، اجرای دوباره یک کد، ارسال پرامپت، خواندن logs درایو.",
+            (card.right - 24, card.top + 52), 10, self.c_("text_dim"),
         )
         return card.bottom + 12
 

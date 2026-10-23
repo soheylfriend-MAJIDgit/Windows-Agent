@@ -63,7 +63,12 @@ Windows-Agent/
 | **گزارش زنده** | لاگ برنامه دوستونه، پاک‌کردن |
 | **تغییرات** | تاریخچه نسخه‌ها |
 
-> پرامپت ساخت ایجنت مدیریت: [`docs/manager-agent-prompt.md`](docs/manager-agent-prompt.md)
+> **پیش از هر چیز به ایجنت‌های دیگر سؤال نپرس.** اطلاعات هر دو مخزن داخل کد است:
+> - ایجنت مادر: `soheylfriend-MAJIDgit/Windows-Agent` روی `arena/025c788f-windows-agent`
+> - ایجنت همکار: `soheylfriend-MAJIDgit/Windows-Agent-hamkar` روی `arena/beecb74c-windows-agent-hamkar`
+
+> پرامپت کامل ساخت ایجنت مدیریت: [`docs/manager-agent-prompt.md`](docs/manager-agent-prompt.md)
+> (شامل آدرس دو ریپو، قواعد فایل کد، قالب فایل نتیجه و خطا، پالت رنگ و طرح صفحه‌ها)
 
 ## به‌روزرسانی برنامه
 
