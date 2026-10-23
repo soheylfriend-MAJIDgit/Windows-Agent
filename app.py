@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۰.۵
+Windows Agent — نسخه ۱.۰
 ------------------------
-یک رابط کاربری ساده با دو دکمه و دو تب:
+اینجنت مادر می‌نویسد، ایجنت همکار کد پایتون می‌دهد، این برنامه اجرا می‌کند.
 
-  ۱) باز کردن lmarena در کروم و گرفتن اسکرین‌شات (ذخیره در گوگل درایو)
+  ۱) باز کردن سایت در کروم و گرفتن اسکرین‌شات (ذخیره در گوگل درایو)
   ۲) گرفتن گزارش از برنامه‌های باز ویندوز
-  + تب «آخرین تغییرات» و چراغ‌های وضعیت اینترنت / گوگل درایو
+  ۳) بررسی مخزن ایجنت همکار → ذخیره در Desktop\CODES → اجرا
+  + یک کلید: حالت دستی (با اجازه) یا حالت خودکار
 
 نسخه، هش کامیت و تاریخ جلالی ساخت در هدر پنجره نمایش داده می‌شود
 تا همیشه مطمئن شوی کدام نسخه در حال اجراست.
@@ -34,7 +35,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.9"
+APP_VERSION = "1.0"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -55,6 +56,17 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "1.0",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "پوشه codes از مخزن خودمان حذف شد",
+            "مخزن ایجنت همکار جداگانه بررسی می‌شود",
+            "کدها در پوشه CODES روی دسکتاپ ذخیره می‌شوند",
+            "یک کلید: حالت دستی (هر مرحله اجازه) یا حالت خودکار",
+            "مخزن و شاخه ایجنت همکار داخل خود برنامه قابل تنظیم است",
+        ],
+    ),
     (
         "0.9",
         "۱۴۰۵/۰۸/۰۲",
@@ -163,29 +175,34 @@ SCREENSHOT_DIR = DRIVE_BASE_DIR + r"\ScreenShots"
 # گزارش‌ها و نتیجه کدها  →  ...\Windows-Agent-DB\logs
 REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
 
-# خود برنامه و پوشه codes محلی هستند (کنار app.py)
+# خود برنامه محلی است (کنار app.py)
 LOCAL_BASE_DIR = Path(__file__).resolve().parent
 STAMP_FILE = LOCAL_BASE_DIR / "build_stamp.json"
-CODES_DIR = str(LOCAL_BASE_DIR / "codes")
 CODES_STATE_FILE = str(LOCAL_BASE_DIR / "codes_state.json")
 SETTINGS_FILE = LOCAL_BASE_DIR / "settings.json"
 
-DEFAULT_SETTINGS = {"auto_fetch": False, "auto_run": False, "auto_update_app": False}
+# پوشه کدهای ایجنت همکار روی دسکتاپ ساخته می‌شود
+CODES_FOLDER_NAME = "CODES"
+
+# تنظیمات پیش‌فرض — همه چیز دستی است تا خودت روشنش کنی
+DEFAULT_SETTINGS = {
+    "auto": False,          # یک کلید: خودکار یا دستی
+    "collab_owner": "",     # مالک مخزن ایجنت همکار
+    "collab_repo": "",      # نام مخزن ایجنت همکار
+    "collab_branch": "",    # شاخه‌ای که بررسی می‌شود
+}
 
 # ------------------------------------------------------------------
-#  دریافت کد از گیت‌هاب
-#  هر بار version.txt در ریپو عوض شود:
-#    ۱) zip ریپو گرفته می‌شود
-#    ۲) محتویات پوشه codes جایگزین می‌شود
-#    ۳) app.py در صورت تغییر بروز و برنامه ری‌استارت می‌شود
+#  دو مخزن داریم:
+#   ۱) مخزن خودمان (اینجا)  →  فقط نسخه خود برنامه
+#   ۲) مخزن ایجنت همکار      →  کدهای پایتونی که باید اجرا شوند
 # ------------------------------------------------------------------
 GITHUB_OWNER = "soheylfriend-MAJIDgit"
 GITHUB_REPO = "Windows-Agent"
 GITHUB_BRANCH = "arena/025c788f-windows-agent"
-GITHUB_CODES_PATH = "codes"
 GITHUB_VERSION_FILE = "version.txt"
 
-# هر چند ثانیه نسخه گیت‌هاب بررسی شود
+# هر چند ثانیه مخزن همکار بررسی شود (حالت خودکار)
 SYNC_POLL_SECONDS = 10
 
 # آیا بعد از بروزرسانی، برنامه خودش را دوباره راه‌اندازی کند؟
@@ -719,12 +736,49 @@ def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes | None:
         return None
 
 
-def repo_zip() -> bytes | None:
-    """zip کل ریپو."""
-    url = GITHUB_ZIP.format(
-        owner=GITHUB_OWNER, repo=GITHUB_REPO, branch=GITHUB_BRANCH
-    )
+def repo_zip(
+    owner: str = GITHUB_OWNER, repo: str = GITHUB_REPO, branch: str = GITHUB_BRANCH
+) -> bytes | None:
+    """zip کل ریپو (بدون کلید API، بدون محدودیت درخواست)."""
+    if not (owner and repo and branch):
+        return None
+    url = GITHUB_ZIP.format(owner=owner, repo=repo, branch=branch)
     return _http_get_bytes(url, timeout=40)
+
+
+def ensure_codes_dir() -> Path:
+    """پوشه CODES روی دسکتاپ؛ اگر نبود ساخته می‌شود."""
+    target = get_desktop_dir() / CODES_FOLDER_NAME
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return target
+
+
+def extract_py_files(zip_bytes: bytes) -> dict[str, bytes]:
+    """فایل‌های پایتون سطح بالای مخزن: {نام فایل: محتوا}"""
+    import io
+    import zipfile
+
+    result: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for name in zf.namelist():
+                if name.endswith("/"):
+                    continue
+                parts = name.split("/", 1)
+                if len(parts) != 2:
+                    continue
+                inner = parts[1]
+                if "/" in inner or not inner.lower().endswith(".py"):
+                    continue
+                if inner.startswith("."):
+                    continue
+                result[inner] = zf.read(name)
+    except (zipfile.BadZipFile, OSError):
+        return {}
+    return result
 
 
 def extract_folder(zip_bytes: bytes, folder: str) -> dict[str, bytes]:
@@ -815,7 +869,7 @@ def save_codes_state(state: dict) -> None:
 
 
 def run_code_job(path: Path) -> tuple[bool, str, str]:
-    """یک فایل job_*.py را اجرا و نتیجه را در logs گوگل درایو ذخیره می‌کند.
+    """یک فایل پایتون را اجرا و نتیجه را در logs گوگل درایو ذخیره می‌کند.
 
     خروجی: (موفق بود؟، نام فایل، متن نتیجه)
     """
@@ -824,7 +878,7 @@ def run_code_job(path: Path) -> tuple[bool, str, str]:
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        dest_dir = Path(CODES_DIR)
+        dest_dir = ensure_codes_dir()
 
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -956,15 +1010,16 @@ class AgentApp:
         self.font_button = ("Segoe UI", 11, "bold")
 
         self.settings = load_settings()
-        self._sync_running = False
-        self._sync_stop = threading.Event()
+        self._watch_running = False
+        self._watch_stop = threading.Event()
+        self._last_version: str | None = None
 
         self._build_ui()
         self.root.after(120, self._drain_log_queue)
         self._start_status_monitor()
 
-        if self.settings["auto_fetch"]:
-            self.start_sync()
+        if self.settings["auto"]:
+            self.start_watch()
 
         self.log(f"به Windows Agent خوش آمدید — نسخه {APP_VERSION}")
         self.log(
@@ -976,18 +1031,17 @@ class AgentApp:
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
         self.log("تب «آخرین تغییرات» تاریخچه نسخه‌ها را نشان می‌دهد.")
         self.log("")
-        self.log("🔒 هیچ کاری خودکار انجام نشد. کنترل کامل دست شماست.")
-        self.log(
-            "   دریافت خودکار کد: "
-            + ("روشن" if self.settings["auto_fetch"] else "خاموش")
-            + " | اجرای خودکار: "
-            + ("روشن" if self.settings["auto_run"] else "خاموش")
-            + " | آپدیت برنامه: "
-            + ("روشن" if self.settings["auto_update_app"] else "خاموش")
-        )
-        self.log("   برای گرفتن کدها دکمه «بررسی و دریافت کد» را بزنید.")
-        self.log(f"منبع کد: {GITHUB_OWNER}/{GITHUB_REPO} @ {GITHUB_BRANCH}")
-        self.log(f"پوشه کدها (محلی): {CODES_DIR}")
+        codes_dir = ensure_codes_dir()
+        if self.settings["auto"]:
+            self.log("⚡ حالت خودکار روشن است — بررسی و اجرا خودکار انجام می‌شود.")
+        else:
+            self.log("🔒 حالت دستی — هیچ کاری بدون اجازه تو انجام نمی‌شود.")
+        self.log(f"پوشه کدهای ایجنت همکار: {codes_dir}")
+        owner, repo, branch = self.collab_info()
+        if owner and repo:
+            self.log(f"مخزن همکار: {owner}/{repo} @ {branch}")
+        else:
+            self.log("مخزن همکار: تنظیم نشده (در تب «ایجنت همکار» وارد کن).")
         self.log("")
 
         shots_dir, shots_ok = resolve_screenshot_dir()
@@ -1067,7 +1121,8 @@ class AgentApp:
 
         self.lamp_internet = self._make_lamp(lamps_bar, "اینترنت")
         self.lamp_drive = self._make_lamp(lamps_bar, "گوگل درایو")
-        self.lamp_github = self._make_lamp(lamps_bar, "گیت‌هاب")
+        self.lamp_repo = self._make_lamp(lamps_bar, "مخزن من")
+        self.lamp_collab = self._make_lamp(lamps_bar, "مخزن همکار")
 
         tk.Label(
             lamps_bar,
@@ -1077,70 +1132,34 @@ class AgentApp:
             bg="#e8edf7",
         ).pack(side="right", padx=14)
 
-        # ------------------- پنل کنترل خودکارسازی -------------------
-        auto_bar = tk.LabelFrame(
-            self.root,
-            text="  کنترل خودکارسازی (پیش‌فرض: خاموش)  ",
-            font=("Tahoma", 9, "bold"),
-            bg="#ffffff",
-            fg="#3b4763",
-            bd=1,
-            relief="solid",
-            pady=6,
-        )
+        # ------------------- کلید خودکار / دستی -------------------
+        auto_bar = tk.Frame(self.root, bg="#ffffff", pady=8)
         auto_bar.pack(fill="x", padx=12, pady=(8, 0))
 
-        self.var_auto_fetch = tk.BooleanVar(value=self.settings["auto_fetch"])
-        self.var_auto_run = tk.BooleanVar(value=self.settings["auto_run"])
-        self.var_auto_update = tk.BooleanVar(value=self.settings["auto_update_app"])
-
-        tk.Checkbutton(
-            auto_bar,
-            text="به‌روزرسانی خودکار خود برنامه",
-            variable=self.var_auto_update,
-            font=("Tahoma", 9),
-            bg="#ffffff",
-            fg="#1f2a44",
-            activebackground="#ffffff",
-            anchor="e",
-            cursor="hand2",
-            command=self.action_toggle_auto,
-        ).pack(side="right", padx=4)
-
-        tk.Checkbutton(
-            auto_bar,
-            text="دریافت خودکار کد از گیت‌هاب (هر ۱۰ ثانیه)",
-            variable=self.var_auto_fetch,
-            font=("Tahoma", 9),
-            bg="#ffffff",
-            fg="#1f2a44",
-            activebackground="#ffffff",
-            anchor="e",
-            cursor="hand2",
-            command=self.action_toggle_auto,
-        ).pack(side="right", padx=(14, 4))
-
-        tk.Checkbutton(
-            auto_bar,
-            text="اجرای خودکار کدهای جدید",
-            variable=self.var_auto_run,
-            font=("Tahoma", 9),
-            bg="#ffffff",
-            fg="#1f2a44",
-            activebackground="#ffffff",
-            anchor="e",
-            cursor="hand2",
-            command=self.action_toggle_auto,
-        ).pack(side="right", padx=4)
-
-        self.auto_indicator = tk.Label(
+        self.var_auto = tk.BooleanVar(value=self.settings["auto"])
+        self.btn_auto = tk.Button(
             auto_bar,
             text="",
-            font=("Tahoma", 8),
-            bg="#ffffff",
-            fg="#8a93a6",
+            font=("Tahoma", 11, "bold"),
+            fg="white",
+            relief="flat",
+            cursor="hand2",
+            padx=18,
+            pady=10,
+            command=self.action_toggle_auto,
         )
-        self.auto_indicator.pack(side="left", padx=10)
+        self.btn_auto.pack(side="right")
+
+        tk.Label(
+            auto_bar,
+            text="در حالت دستی هر مرحله اجازه می‌گیرد؛ در حالت خودکار همه چیز خودکار است.",
+            font=("Tahoma", 9),
+            bg="#ffffff",
+            fg="#3b4763",
+            anchor="e",
+        ).pack(side="right", padx=12)
+
+        self._refresh_auto_button()
 
         # ------------------------- تب‌ها -------------------------
         style = ttk.Style()
@@ -1237,34 +1256,69 @@ class AgentApp:
         self.changes_box.insert("end", self._changelog_text())
         self.changes_box.configure(state="disabled")
 
-        # ---------- تب ۳: کدها ----------
+        # ---------- تب ۳: ایجنت همکار ----------
         tab_codes = tk.Frame(notebook, bg=bg)
-        notebook.add(tab_codes, text="  کدها  ")
+        notebook.add(tab_codes, text="  ایجنت همکار  ")
 
-        codes_top = tk.Frame(tab_codes, bg=bg)
-        codes_top.pack(fill="x", padx=6, pady=(6, 0))
-
-        tk.Label(
-            codes_top,
-            text=f"پوشه کدها: {CODES_DIR}",
-            font=("Tahoma", 9),
-            bg=bg,
-            fg="#3b4763",
-            anchor="e",
-        ).pack(side="right")
-
-        self.codes_status = tk.Label(
-            codes_top,
-            text="در انتظار دستور شما",
+        # --- تنظیمات مخزن ---
+        repo_row = tk.LabelFrame(
+            tab_codes,
+            text="  مخزن ایجنت همکار  ",
             font=("Tahoma", 9, "bold"),
             bg=bg,
-            fg="#8a93a6",
-            anchor="w",
+            fg="#3b4763",
+            bd=1,
+            relief="solid",
+            pady=6,
         )
-        self.codes_status.pack(side="left", padx=(0, 10))
+        repo_row.pack(fill="x", padx=6, pady=(6, 0))
 
-        self.btn_run_codes = tk.Button(
-            codes_top,
+        owner, repo_name, branch_name = self.collab_info()
+
+        self.ent_owner = tk.Entry(repo_row, font=("Consolas", 10), justify="right", width=22)
+        self.ent_owner.insert(0, owner)
+        self.ent_owner.pack(side="right", padx=4)
+
+        tk.Label(
+            repo_row, text="مالک (owner)", font=("Tahoma", 9), bg=bg, fg="#3b4763"
+        ).pack(side="right")
+
+        self.ent_repo = tk.Entry(repo_row, font=("Consolas", 10), justify="right", width=18)
+        self.ent_repo.insert(0, repo_name)
+        self.ent_repo.pack(side="right", padx=(12, 4))
+
+        tk.Label(
+            repo_row, text="مخزن (repo)", font=("Tahoma", 9), bg=bg, fg="#3b4763"
+        ).pack(side="right")
+
+        self.ent_branch = tk.Entry(repo_row, font=("Consolas", 10), justify="right", width=14)
+        self.ent_branch.insert(0, branch_name)
+        self.ent_branch.pack(side="right", padx=(12, 4))
+
+        tk.Label(
+            repo_row, text="شاخه (branch)", font=("Tahoma", 9), bg=bg, fg="#3b4763"
+        ).pack(side="right")
+
+        tk.Button(
+            repo_row,
+            text="💾 ذخیره",
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            bg="#5c6b8a",
+            fg="white",
+            activebackground="#4a5773",
+            activeforeground="white",
+            cursor="hand2",
+            padx=10,
+            command=self.action_save_collab,
+        ).pack(side="left", padx=6)
+
+        # --- دکمه‌های مرحله‌ای ---
+        action_row = tk.Frame(tab_codes, bg=bg, pady=8)
+        action_row.pack(fill="x", padx=6)
+
+        tk.Button(
+            action_row,
             text="▶️  اجرای کدهای جدید",
             font=("Segoe UI", 9, "bold"),
             relief="flat",
@@ -1273,15 +1327,14 @@ class AgentApp:
             activebackground="#268158",
             activeforeground="white",
             cursor="hand2",
-            padx=12,
-            pady=4,
-            command=self.action_run_codes,
-        )
-        self.btn_run_codes.pack(side="left", padx=6)
+            padx=14,
+            pady=6,
+            command=self.action_run_new,
+        ).pack(side="right", padx=4)
 
-        self.btn_fetch = tk.Button(
-            codes_top,
-            text="📥  بررسی و دریافت کد",
+        tk.Button(
+            action_row,
+            text="📥  بررسی مخزن همکار",
             font=("Segoe UI", 9, "bold"),
             relief="flat",
             bg="#2f6fed",
@@ -1289,24 +1342,32 @@ class AgentApp:
             activebackground="#255bc4",
             activeforeground="white",
             cursor="hand2",
-            padx=12,
-            pady=4,
-            command=self.action_fetch_codes,
+            padx=14,
+            pady=6,
+            command=self.action_check_collab,
+        ).pack(side="right", padx=4)
+
+        self.codes_status = tk.Label(
+            action_row,
+            text="در انتظار دستور شما",
+            font=("Tahoma", 9, "bold"),
+            bg=bg,
+            fg="#8a93a6",
+            anchor="w",
         )
-        self.btn_fetch.pack(side="left", padx=6)
+        self.codes_status.pack(side="left", padx=8)
 
         self.codes_box = scrolledtext.ScrolledText(
             tab_codes,
             wrap="word",
-            font=("Consolas", 10),
+            font=("Tahoma", 10),
             bg="#ffffff",
             fg="#1f2a44",
             relief="flat",
             padx=10,
             pady=8,
         )
-        self.codes_box.pack(fill="both", expand=True, padx=6, pady=6)
-        self.codes_box.configure(state="disabled")
+        self.codes_box.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.codes_box.insert("end", self._codes_summary())
         self.codes_box.configure(state="disabled")
 
@@ -1320,7 +1381,7 @@ class AgentApp:
         )
         footer.pack(pady=(0, 6))
 
-        self._refresh_auto_indicator()
+        self._refresh_auto_button()
 
     # --- چراغ‌های وضعیت ------------------------------------------------------
 
@@ -1381,99 +1442,215 @@ class AgentApp:
             lines.append("")
         return "\n".join(lines)
 
-    # --- همگام‌سازی با گیت‌هاب --------------------------------------------------
+    # --- موتور اصلی: مخزن ایجنت همکار ----------------------------------------
 
     def _run_on_ui(self, fn) -> None:
         """اجرای یک تغییر رابط کاربری از دل نخست (thread) به‌صورت امن."""
         self.ui_queue.put(fn)
 
-    def start_sync(self) -> None:
-        """پایش خودکار؛ فقط وقتی کاربر روشنش کرده باشد."""
-        if self._sync_running:
+    def collab_info(self) -> tuple[str, str, str]:
+        return (
+            self.settings.get("collab_owner", "").strip(),
+            self.settings.get("collab_repo", "").strip(),
+            self.settings.get("collab_branch", "").strip(),
+        )
+
+    def collab_ready(self) -> bool:
+        owner, repo, branch = self.collab_info()
+        return bool(owner and repo and branch)
+
+    def ask(self, question: str) -> bool:
+        """در حالت دستی اجازه می‌گیرد؛ در حالت خودکار همیشه بله."""
+        if self.settings["auto"]:
+            return True
+        try:
+            from tkinter import messagebox
+
+            return bool(messagebox.askyesno(APP_TITLE, question))
+        except Exception:
+            return False
+
+    # --- حالت خودکار ----------------------------------------------------------
+
+    def start_watch(self) -> None:
+        if self._watch_running:
             return
-        self._sync_running = True
-        self._sync_stop.clear()
+        self._watch_running = True
+        self._watch_stop.clear()
 
         def loop() -> None:
-            while not self._sync_stop.is_set():
+            while not self._watch_stop.is_set():
                 try:
-                    self.sync_once()
+                    self.auto_cycle()
                 except Exception:
                     pass
-                self._sync_stop.wait(SYNC_POLL_SECONDS)
+                self._watch_stop.wait(SYNC_POLL_SECONDS)
 
         threading.Thread(target=loop, daemon=True).start()
 
-    def stop_sync(self) -> None:
-        self._sync_running = False
-        self._sync_stop.set()
+    def stop_watch(self) -> None:
+        self._watch_running = False
+        self._watch_stop.set()
 
-    # --- دکمه‌های دستی --------------------------------------------------------
+    def auto_cycle(self) -> None:
+        """یک دور کامل خودکار: آپدیت برنامه → دانلود کد همکار → اجرا."""
+        self.check_app_update(manual=False)
+        self.fetch_collab(manual=False)
+        self.run_new_codes(manual=False)
 
-    def action_fetch_codes(self) -> None:
-        """دکمه «بررسی و دریافت کد» — فقط دریافت، بدون اجرا."""
-        if self.busy:
-            return
-        self.log("📥 بررسی نسخه جدید در گیت‌هاب…")
-        threading.Thread(target=self.sync_once, kwargs={"manual": True}, daemon=True).start()
-
-    def action_run_codes(self) -> None:
-        """دکمه «اجرای کدهای جدید» — با فشار خودت اجرا می‌شود."""
-        if self.busy:
-            return
-        self.run_pending_codes(manual=True)
+    # --- کلید خودکار / دستی ---------------------------------------------------
 
     def action_toggle_auto(self) -> None:
-        """کلیک روی کلیدهای خودکارسازی."""
-        auto_fetch = self.var_auto_fetch.get()
-        auto_run = self.var_auto_run.get()
-        auto_update = self.var_auto_update.get()
-
-        # اجرا/آپدیت خودکار بی‌معنی است اگر دریافت خودکار خاموش باشد
-        if (auto_run or auto_update) and not auto_fetch:
-            self.var_auto_fetch.set(True)
-            auto_fetch = True
-
-        self.settings["auto_fetch"] = auto_fetch
-        self.settings["auto_run"] = auto_run
-        self.settings["auto_update_app"] = auto_update
+        self.settings["auto"] = bool(self.var_auto.get())
         save_settings(self.settings)
 
-        if auto_fetch:
-            self.start_sync()
+        if self.settings["auto"]:
+            self.log("⚡ حالت خودکار روشن شد — بررسی و اجرا بدون پرسیدن انجام می‌شود.")
+            self.start_watch()
         else:
-            self.stop_sync()
+            self.log("🔒 حالت دستی — هیچ کاری بدون اجازه تو انجام نمی‌شود.")
+            self.stop_watch()
 
-        self.log(
-            "⚙️ تنظیمات ذخیره شد — دریافت خودکار: "
-            + ("روشن" if auto_fetch else "خاموش")
-            + " | اجرای خودکار: "
-            + ("روشن" if auto_run else "خاموش")
-            + " | آپدیت برنامه: "
-            + ("روشن" if auto_update else "خاموش")
-        )
-        self._refresh_auto_indicator()
+        self._refresh_auto_button()
 
-    def _refresh_auto_indicator(self) -> None:
-        text = (
-            f"دریافت خودکار: {'روشن' if self.settings['auto_fetch'] else 'خاموش'}"
-            f"  ·  اجرا: {'روشن' if self.settings['auto_run'] else 'خاموش'}"
-            f"  ·  آپدیت برنامه: {'روشن' if self.settings['auto_update_app'] else 'خاموش'}"
-        )
-        self.auto_indicator.configure(
-            text=text,
-            fg="#2e9e6b" if self.settings["auto_fetch"] else "#8a93a6",
-        )
+    def _refresh_auto_button(self) -> None:
+        auto = self.settings["auto"]
+        if auto:
+            self.btn_auto.configure(
+                text="⚡  حالت خودکار — کلیک کن تا دستی شود",
+                bg="#2e9e6b",
+                activebackground="#268158",
+            )
+        else:
+            self.btn_auto.configure(
+                text="🔒  حالت دستی — کلیک کن تا خودکار شود",
+                bg="#5c6b8a",
+                activebackground="#4a5773",
+            )
 
-    def sync_once(self, manual: bool = False) -> bool:
-        """بسته کد را از گیت‌هاب می‌گیرد. اجرا فقط با اجازه کاربر."""
-        data = repo_zip()
-        if not data:
-            self._run_on_ui(lambda: self._set_lamp(self.lamp_github, "bad", "قطع"))
+    # --- مرحله ۱: بررسی و دانلود از مخزن همکار --------------------------------
+
+    def action_check_collab(self) -> None:
+        if self.busy:
+            return
+        if not self.collab_ready():
+            self.log("⚠️ اول مخزن و شاخه ایجنت همکار را تنظیم کن (بالای همین تب).")
+            return
+        if not self.ask("مخزن ایجنت همکار بررسی شود؟"):
+            self.log("⏹ لغو شد.")
+            return
+        threading.Thread(
+            target=self.fetch_collab, kwargs={"manual": True}, daemon=True
+        ).start()
+
+    def fetch_collab(self, manual: bool = True) -> list[str]:
+        """کدهای پایتون مخزن همکار را در پوشه CODES روی دسکتاپ می‌گذارد."""
+        owner, repo, branch = self.collab_info()
+        if not (owner and repo and branch):
             if manual:
-                self.log("❌ دریافت از گیت‌هاب ممکن نشد (اینترنت یا پروکسی را چک کنید).")
-            return False
+                self.log("⚠️ مخزن ایجنت همکار تنظیم نشده است.")
+            return []
 
+        codes_dir = ensure_codes_dir()
+        data = repo_zip(owner, repo, branch)
+        if not data:
+            self._run_on_ui(lambda: self._set_lamp(self.lamp_collab, "bad", "قطع"))
+            if manual:
+                self.log(f"❌ دریافت از {owner}/{repo} ممکن نشد.")
+            return []
+
+        files = extract_py_files(data)
+        self._run_on_ui(lambda: self._set_lamp(self.lamp_collab, "ok", f"{len(files)} فایل"))
+
+        if not files:
+            if manual:
+                self.log("📭 در مخزن همکار هیچ فایل پایتونی نیست.")
+            return []
+
+        new_names = []
+        skipped = 0
+        for name, content in files.items():
+            target = codes_dir / name
+            try:
+                if target.exists() and target.read_bytes() == content:
+                    continue
+                if manual and not self.ask(f"فایل «{name}» دانلود شود؟"):
+                    self.log(f"⏭ {name} رد شد.")
+                    skipped += 1
+                    continue
+                target.write_bytes(content)
+                new_names.append(name)
+            except OSError as exc:
+                self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
+
+        if new_names:
+            self.log(f"📥 {len(new_names)} فایل جدید در پوشه CODES ذخیره شد: {', '.join(new_names)}")
+            self.log(f"   مسیر: {codes_dir}")
+        elif manual:
+            if skipped:
+                self.log(f"⏭ {skipped} فایل با اجازه تو دانلود نشد.")
+            else:
+                self.log("✅ فایل جدیدی نبود — پوشه CODES به‌روز است.")
+
+        self._run_on_ui(self.refresh_codes_box)
+        return new_names
+
+    # --- مرحله ۲: اجرای کدهای جدید --------------------------------------------
+
+    def action_run_new(self) -> None:
+        if self.busy:
+            return
+        if not self.ask("کدهای جدید اجرا شوند؟"):
+            self.log("⏹ لغو شد.")
+            return
+        threading.Thread(
+            target=self.run_new_codes, kwargs={"manual": True}, daemon=True
+        ).start()
+
+    def run_new_codes(self, manual: bool = True) -> None:
+        """هر فایل پایتونی که تا حالا اجرا نشده (یا عوض شده) را اجرا می‌کند."""
+        codes_dir = ensure_codes_dir()
+        state = load_codes_state()
+        pending = []
+
+        for path in sorted(codes_dir.glob("*.py")):
+            try:
+                current = short_hash(path.read_bytes())
+            except OSError:
+                continue
+            if state.get(path.name, {}).get("hash") == current:
+                continue
+            pending.append(path)
+
+        if not pending:
+            if manual:
+                self.log("✅ کد جدیدی برای اجرا نیست.")
+                self._run_on_ui(self.refresh_codes_box)
+            return
+
+        self._run_on_ui(
+            lambda: self.codes_status.configure(text="در حال اجرا…", fg="#2f6fed")
+        )
+        for path in pending:
+            self.log(f"▶️ اجرای {path.name}")
+            ok, name, text = run_code_job(path)
+            for line in text.splitlines()[-10:]:
+                self.log(f"   {line}")
+            self.log(f"{'✅' if ok else '❌'} پایان {name}")
+            self._run_on_ui(
+                lambda n=name, o=ok: self.codes_status.configure(
+                    text=f"آخرین اجرا: {n} — {'موفق' if o else 'خطا'}",
+                    fg="#2e9e6b" if o else "#d64545",
+                )
+            )
+        self._run_on_ui(self.refresh_codes_box)
+
+    # --- آپدیت خود برنامه (از مخزن خودمان) ------------------------------------
+
+    def check_app_update(self, manual: bool = True) -> bool:
+        data = repo_zip(GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
+        if not data:
+            return False
         version_bytes = extract_file(data, GITHUB_VERSION_FILE)
         version = (
             version_bytes.decode("utf-8", errors="replace").strip()
@@ -1481,37 +1658,28 @@ class AgentApp:
             else "?"
         )
         self._last_version = version
-        self._run_on_ui(
-            lambda: self._set_lamp(self.lamp_github, "ok", version[:7])
-        )
+        self._run_on_ui(lambda: self._set_lamp(self.lamp_repo, "ok", version[:7]))
 
         remote_app = extract_file(data, "app.py")
-        app_differs = False
+        if not remote_app:
+            return False
         try:
-            app_differs = bool(remote_app) and remote_app != Path(__file__).resolve().read_bytes()
+            same = remote_app == Path(__file__).resolve().read_bytes()
         except OSError:
-            app_differs = False
+            same = True
+        if same:
+            return False
 
-        if app_differs and self.settings["auto_update_app"]:
-            if self._update_app_if_needed(data, version):
-                return True  # برنامه خودش را ری‌استارت می‌کند
-        elif app_differs and manual:
-            self.log("ℹ️ نسخه تازه‌تری از خود برنامه هم وجود دارد.")
-            self.log("   نصب نمی‌شود مگر گزینه «به‌روزرسانی خودکار برنامه» را روشن کنی.")
-
-        changed = self._replace_codes(data)
         if manual:
-            if changed:
-                self.log("✅ کدهای جدید در پوشه codes قرار گرفت (هنوز اجرا نشده‌اند).")
-                self.log("   برای اجرا دکمه «اجرای کدهای جدید» را بزنید.")
-            else:
-                self.log("✅ کدها به‌روز است؛ چیز تازه‌ای نبود.")
-        elif changed and self.settings["auto_run"]:
-            self.log("🔁 اجرای خودکار روشن است — کدهای جدید اجرا می‌شوند.")
-            self.run_pending_codes(manual=False)
-
-        self._run_on_ui(self.refresh_codes_box)
-        return True
+            self._run_on_ui(self.refresh_codes_box)
+            self.log("ℹ️ نسخه تازه‌تری از خود برنامه هست.")
+            if not self.ask("نسخه جدید برنامه نصب و برنامه ری‌استارت شود؟"):
+                self.log("⏹ نصب نسخه جدید لغو شد.")
+                return False
+        else:
+            if not self.settings["auto"]:
+                return False
+        return self._update_app_if_needed(data, version)
 
     def _update_app_if_needed(self, data: bytes, version: str) -> bool:
         remote = extract_file(data, "app.py")
@@ -1576,122 +1744,59 @@ class AgentApp:
             os._exit(0)
         return True
 
-    def _replace_codes(self, data: bytes) -> bool:
-        """محتویات پوشه codes ریپو جایگزین پوشه codes محلی می‌شود."""
-        files = extract_folder(data, GITHUB_CODES_PATH)
-        codes_dir = Path(CODES_DIR)
-        try:
-            codes_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            self.log(f"⚠️ ساخت پوشه codes ممکن نشد: {exc}")
-            return False
+    # --- تنظیمات مخزن همکار ---------------------------------------------------
 
-        removed = 0
-        for existing in codes_dir.glob("*.py"):
-            if existing.name not in files:
-                try:
-                    existing.unlink()
-                    removed += 1
-                except OSError:
-                    pass
-
-        written = 0
-        unchanged = 0
-        for name, content in files.items():
-            target = codes_dir / name
-            try:
-                if target.exists() and target.read_bytes() == content:
-                    unchanged += 1
-                    continue
-                target.write_bytes(content)
-                written += 1
-            except OSError as exc:
-                self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
-
-        if written or removed:
-            self.log(
-                f"📁 پوشه codes به‌روز شد: {written} فایل جدید/تغییریافته"
-                + (f"، {removed} حذف‌شده" if removed else "")
-            )
-        return written > 0 or removed > 0
-
-    def run_pending_codes(self, manual: bool = True) -> None:
-        """کدهایی که تازه آمده‌اند یا تغییر کرده‌اند را اجرا می‌کند."""
-        codes_dir = Path(CODES_DIR)
-        state = load_codes_state()
-        pending = []
-
-        for path in sorted(codes_dir.glob("job_*.py")):
-            try:
-                current = short_hash(path.read_bytes())
-            except OSError:
-                continue
-            if state.get(path.name, {}).get("hash") == current:
-                continue
-            pending.append(path)
-
-        if not pending:
-            if manual:
-                self.log("✅ کد جدیدی برای اجرا نیست. همه کدها قبلاً اجرا شده‌اند.")
-            self._run_on_ui(self.refresh_codes_box)
-            return
-
-        self._run_on_ui(
-            lambda: self.codes_status.configure(text="در حال اجرا…", fg="#2f6fed")
+    def action_save_collab(self) -> None:
+        owner = self.ent_owner.get().strip()
+        repo = self.ent_repo.get().strip()
+        branch = self.ent_branch.get().strip()
+        if "/" in owner:
+            owner, _, rest = owner.partition("/")
+            repo = repo or rest
+        self.settings["collab_owner"] = owner
+        self.settings["collab_repo"] = repo
+        self.settings["collab_branch"] = branch or "main"
+        save_settings(self.settings)
+        self.log(
+            "💾 مخزن همکار ذخیره شد: "
+            f"{self.settings['collab_owner']}/{self.settings['collab_repo']}"
+            f" @ {self.settings['collab_branch']}"
         )
-        for path in pending:
-            self.log(f"▶️ اجرای {path.name}")
-            ok, name, text = run_code_job(path)
-            for line in text.splitlines()[-10:]:
-                self.log(f"   {line}")
-            self.log(f"{'✅' if ok else '❌'} پایان {name}")
-            self._run_on_ui(
-                lambda n=name, o=ok: self.codes_status.configure(
-                    text=f"آخرین اجرا: {n} — {'موفق' if o else 'خطا'}",
-                    fg="#2e9e6b" if o else "#d64545",
-                )
-            )
         self._run_on_ui(self.refresh_codes_box)
 
-    # --- موتور اجرای کدهای جانبی ---------------------------------------------
+    # --- نمایش وضعیت کدها -----------------------------------------------------
 
     def _codes_summary(self) -> str:
+        owner, repo, branch = self.collab_info()
+        codes_dir = get_desktop_dir() / CODES_FOLDER_NAME
         state = load_codes_state()
+
         lines = [
-            "کدهای جانبی",
+            "ایجنت همکار",
             "=" * 58,
-            f"منبع کد: GitHub — {GITHUB_OWNER}/{GITHUB_REPO} ({GITHUB_BRANCH})",
-            f"آخرین نسخه دریافتی: {getattr(self, '_last_version', None) or '—'}",
-            f"دریافت خودکار: {'روشن' if self.settings['auto_fetch'] else 'خاموش'}"
-            f"  ·  اجرای خودکار: {'روشن' if self.settings['auto_run'] else 'خاموش'}"
-            f"  ·  آپدیت برنامه: {'روشن' if self.settings['auto_update_app'] else 'خاموش'}",
-            "",
-            "روش کار:",
-            "  ۱) دکمه «بررسی و دریافت کد» → کدها از گیت‌هاب در پوشه codes می‌آیند.",
-            "  ۲) دکمه «اجرای کدهای جدید» → همان کدها اجرا و نتیجه در logs نوشته می‌شود.",
-            "  هیچ‌کدام از این دو کار تا وقتی خودت نزنی انجام نمی‌شود.",
-            "",
-            f"پوشه کدها: {CODES_DIR}",
-            f"پوشه نتیجه: {REPORT_DIR}",
+            f"مخزن: {owner}/{repo} @ {branch}" if owner and repo else "مخزن: تنظیم نشده",
+            f"پوشه کدها: {codes_dir}",
+            f"حالت: {'خودکار' if self.settings['auto'] else 'دستی (با اجازه تو)'}",
             "",
         ]
-        if not state:
-            lines.append("هنوز هیچ کدی اجرا نشده است.")
-            lines.append("")
-            lines.append(
-                "هر فایلی با نام job_*.py که در پوشه کدها قرار بگیرد، "
-                "خودکار اجرا می‌شود."
-            )
+
+        py_files = sorted(codes_dir.glob("*.py")) if codes_dir.exists() else []
+        if not py_files:
+            lines.append("هنوز کدی در پوشه CODES نیست.")
         else:
-            lines.append(f"تعداد کدهای اجراشده: {len(state)}")
-            lines.append("")
-            for name, info in sorted(state.items()):
-                mark = "✔" if info.get("ok") else "✘"
-                lines.append(
-                    f"{mark} {name} — کد خروج {info.get('exit_code')} "
-                    f"— {info.get('ran_at')} — {info.get('duration_s')} ثانیه"
-                )
+            lines.append(f"کدهای موجود: {len(py_files)}")
+            for path in py_files:
+                info = state.get(path.name, {})
+                if not info:
+                    status = "اجرا نشده"
+                else:
+                    status = f"اجرا شده — {info.get('ran_at', '?')}"
+                lines.append(f"   • {path.name}  [{status}]")
         lines.append("")
+        lines.append("چطور کار می‌کند:")
+        lines.append("  ۱) ایجنت همکار فایل .py را در مخزن خودش می‌گذارد.")
+        lines.append("  ۲) دکمه «بررسی مخزن» → فایل در پوشه CODES دسکتاپ ذخیره می‌شود.")
+        lines.append("  ۳) دکمه «اجرا» → کد اجرا و نتیجه در logs گوگل درایو نوشته می‌شود.")
         return "\n".join(lines)
 
     def refresh_codes_box(self) -> None:
