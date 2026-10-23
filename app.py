@@ -34,7 +34,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.6"
+APP_VERSION = "0.7"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -55,6 +55,16 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "0.7",
+        "۱۴۰۵/۰۸/۰۱",
+        [
+            "دریافت فوری کد از گیت‌هاب (بدون انتظار برای سینک گوگل درایو)",
+            "بروزرسانی خودکار برنامه در چند ثانیه پس از هر پوش",
+            "دریافت کدهای جانبی از پوشه jobs در ریپو و اجرای خودکار",
+            "گوگل درایو فقط برای اسکرین‌شات و گزارش‌ها و نتایج می‌ماند",
+        ],
+    ),
     (
         "0.6",
         "۱۴۰۵/۰۸/۰۱",
@@ -135,6 +145,22 @@ CODES_DONE_DIR = CODES_DIR + r"\done"
 
 # حافظه اجراکننده (کدام فایل‌ها قبلاً اجرا شده‌اند)
 CODES_STATE_FILE = DRIVE_BASE_DIR + r"\codes_state.json"
+
+# ------------------------------------------------------------------
+#  دریافت کد از گیت‌هاب (سریع، چند ثانیه‌ای) به‌جای سینک گوگل درایو
+# ------------------------------------------------------------------
+GITHUB_OWNER = "soheylfriend-MAJIDgit"
+GITHUB_REPO = "Windows-Agent"
+GITHUB_BRANCH = "arena/025c788f-windows-agent"
+
+# هر چند ثانیه گیت‌هاب بررسی شود
+GITHUB_POLL_SECONDS = 20
+
+# پوشه‌ای در ریپو که کدهای جانبی از آن گرفته می‌شوند
+GITHUB_JOBS_PATH = "jobs"
+
+# آیا بعد از دریافت نسخه جدید، برنامه خودش را دوباره راه‌اندازی کند؟
+AUTO_RESTART_ON_UPDATE = True
 
 # فاصله بررسی پوشه کدها و محدودیت زمان اجرا
 CODES_POLL_SECONDS = 3
@@ -578,6 +604,91 @@ def save_report(report_text: str, dest_dir: Path) -> Path:
     return target
 
 
+# ------------------------------------------------ دریافت کد از گیت‌هاب ---
+
+GITHUB_RAW = "https://raw.githubusercontent.com"
+GITHUB_API = "https://api.github.com"
+
+
+def _http_get(url: str, timeout: float = 8.0, etag: str | None = None):
+    """درخواست GET ساده. خروجی: (متن، وضعیت، etag تازه)"""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Windows-Agent",
+            "Accept": "application/vnd.github+json",
+            "Cache-Control": "no-cache",
+        },
+    )
+    if etag:
+        request.add_header("If-None-Match", etag)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return (
+                response.read().decode("utf-8", errors="replace"),
+                response.status,
+                response.headers.get("ETag", ""),
+            )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return "", 304, etag or ""
+        raise
+
+
+def github_latest_sha() -> str | None:
+    """هش آخرین کامیت شاخه در گیت‌هاب."""
+    url = (
+        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/commits/{GITHUB_BRANCH}"
+    )
+    try:
+        text, status, _ = _http_get(url)
+        if status != 200:
+            return None
+        import json
+
+        return json.loads(text).get("sha")
+    except Exception:
+        return None
+
+
+def github_fetch_file(sha: str, path: str) -> str | None:
+    """محتوای یک فایل از ریپو در همان کامیت."""
+    url = f"{GITHUB_RAW}/{GITHUB_OWNER}/{GITHUB_REPO}/{sha}/{path}"
+    try:
+        text, status, _ = _http_get(url)
+        return text if status == 200 else None
+    except Exception:
+        return None
+
+
+def github_list_jobs(sha: str) -> list[str]:
+    """فهرست فایل‌های job_*.py موجود در پوشه jobs ریپو."""
+    url = (
+        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{GITHUB_JOBS_PATH}?ref={sha}"
+    )
+    try:
+        text, status, _ = _http_get(url)
+        if status != 200:
+            return []
+        import json
+
+        items = json.loads(text)
+        return sorted(
+            item["name"]
+            for item in items
+            if item.get("type") == "file"
+            and item["name"].startswith("job_")
+            and item["name"].endswith(".py")
+        )
+    except Exception:
+        return []
+
+
 # ------------------------------------------------- اجراکننده کدهای جانبی ---
 
 def _codes_paths() -> tuple[Path, Path, Path, Path]:
@@ -771,6 +882,7 @@ class AgentApp:
         self.root.after(120, self._drain_log_queue)
         self._start_status_monitor()
         self.start_codes_watcher()
+        self.start_github_sync()
 
         self.log(f"به Windows Agent خوش آمدید — نسخه {APP_VERSION}")
         self.log(
@@ -782,6 +894,7 @@ class AgentApp:
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
         self.log("تب «آخرین تغییرات» تاریخچه نسخه‌ها را نشان می‌دهد.")
         self.log(f"تب «کدها» پوشه {CODES_DIR} را پایش می‌کند.")
+        self.log(f"دریافت فوری کد از گیت‌هاب: {GITHUB_OWNER}/{GITHUB_REPO} @ {GITHUB_BRANCH}")
         self.log("")
 
         shots_dir, shots_ok = resolve_screenshot_dir()
@@ -859,6 +972,7 @@ class AgentApp:
 
         self.lamp_internet = self._make_lamp(lamps_bar, "اینترنت")
         self.lamp_drive = self._make_lamp(lamps_bar, "گوگل درایو")
+        self.lamp_github = self._make_lamp(lamps_bar, "گیت‌هاب")
 
         tk.Label(
             lamps_bar,
@@ -1082,6 +1196,109 @@ class AgentApp:
                 lines.append(f"   • {item}")
             lines.append("")
         return "\n".join(lines)
+
+    # --- دریافت فوری کد از گیت‌هاب --------------------------------------------
+
+    def start_github_sync(self) -> None:
+        """هر چند ثانیه گیت‌هاب را نگاه می‌کند: بروزرسانی برنامه + کدهای جانبی."""
+        self._gh_sha: str | None = None
+        self._gh_seen_jobs: set[str] = set()
+        self._gh_enabled = True
+
+        def loop() -> None:
+            time.sleep(3)
+            while self._gh_enabled:
+                try:
+                    self._github_tick()
+                except Exception:
+                    pass
+                time.sleep(GITHUB_POLL_SECONDS)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _github_tick(self) -> None:
+        sha = github_latest_sha()
+        if not sha:
+            self._set_lamp(self.lamp_github, "bad", "قطع")
+            return
+        self._set_lamp(self.lamp_github, "ok", f"{sha[:7]}")
+
+        first_run = self._gh_sha is None
+        self._gh_sha = sha
+
+        # ۱) بروزرسانی خود برنامه
+        if not first_run:
+            self._maybe_self_update(sha)
+
+        # ۲) کدهای جانبی
+        self._pull_jobs(sha)
+
+    def _maybe_self_update(self, sha: str) -> None:
+        current = self.build.get("commit", "")
+        if current and sha.startswith(current):
+            return
+        remote = github_fetch_file(sha, "app.py")
+        if not remote:
+            return
+        # فقط اگر سالم باشد اعمال کن
+        import py_compile
+        import tempfile
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".py", delete=False, encoding="utf-8"
+            ) as fh:
+                fh.write(remote)
+                temp_path = fh.name
+            py_compile.compile(temp_path, doraise=True)
+        except Exception as exc:
+            self.log(f"⚠️ نسخه جدید گیت‌هاب سالم نیست، اعمال نشد: {exc}")
+            return
+
+        here = Path(__file__).resolve()
+        backup = here.with_suffix(f".backup-{datetime.now():%H%M%S}.py")
+        try:
+            backup.write_bytes(here.read_bytes())
+            here.write_text(remote, encoding="utf-8")
+        except OSError as exc:
+            self.log(f"⚠️ نوشتن نسخه جدید ممکن نشد: {exc}")
+            return
+
+        self.log(f"🔄 نسخه جدید از گیت‌هاب دریافت شد: {sha[:7]}")
+        self.log(f"   پشتیبان: {backup.name}")
+        if AUTO_RESTART_ON_UPDATE:
+            self.log("   برنامه در ۳ ثانیه دوباره راه‌اندازی می‌شود…")
+            time.sleep(3)
+            try:
+                subprocess.Popen([sys.executable, str(here)])
+            except OSError:
+                pass
+            os._exit(0)
+
+    def _pull_jobs(self, sha: str) -> None:
+        codes_dir = Path(CODES_DIR)
+        try:
+            codes_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+
+        for name in github_list_jobs(sha):
+            if name in self._gh_seen_jobs:
+                continue
+            state = load_codes_state()
+            if name in state:
+                self._gh_seen_jobs.add(name)
+                continue
+
+            content = github_fetch_file(sha, f"{GITHUB_JOBS_PATH}/{name}")
+            if not content:
+                continue
+            try:
+                (codes_dir / name).write_text(content, encoding="utf-8")
+                self._gh_seen_jobs.add(name)
+                self.log(f"📥 کد تازه از گیت‌هاب: {name}")
+            except OSError as exc:
+                self.log(f"⚠️ ذخیره کد ممکن نشد: {exc}")
 
     # --- موتور اجرای کدهای جانبی ---------------------------------------------
 
