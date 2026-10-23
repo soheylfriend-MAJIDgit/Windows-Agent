@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۱.۰
+Windows Agent — نسخه ۱.۱
 ------------------------
 اینجنت مادر می‌نویسد، ایجنت همکار کد پایتون می‌دهد، این برنامه اجرا می‌کند.
 
@@ -35,7 +35,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -56,6 +56,17 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "1.1",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "هیچ فایلی در پوشه خود برنامه ذخیره نمی‌شود",
+            "تنظیمات و وضعیت در پوشه کاربر (LOCALAPPDATA) ذخیره می‌شوند",
+            "پشتیبان نسخه قبلی هم در همان پوشه است، نه کنار app.py",
+            "همه خطاها در Google Drive\logs\errors ذخیره می‌شوند",
+            "خطای دریافت مخزن، خطای اجرا و خطای شروع همه ثبت می‌شوند",
+        ],
+    ),
     (
         "1.0",
         "۱۴۰۵/۰۸/۰۲",
@@ -175,11 +186,20 @@ SCREENSHOT_DIR = DRIVE_BASE_DIR + r"\ScreenShots"
 # گزارش‌ها و نتیجه کدها  →  ...\Windows-Agent-DB\logs
 REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
 
-# خود برنامه محلی است (کنار app.py)
+# پوشه‌ی خود برنامه — هیچ فایلی اینجا نوشته نمی‌شود
 LOCAL_BASE_DIR = Path(__file__).resolve().parent
-STAMP_FILE = LOCAL_BASE_DIR / "build_stamp.json"
-CODES_STATE_FILE = str(LOCAL_BASE_DIR / "codes_state.json")
-SETTINGS_FILE = LOCAL_BASE_DIR / "settings.json"
+
+# همه‌ی فایل‌های وضعیت در پوشه‌ی کاربر ذخیره می‌شوند، نه کنار برنامه
+IS_WINDOWS = os.name == "nt"
+if IS_WINDOWS:
+    STATE_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Windows-Agent"
+else:
+    STATE_DIR = Path.home() / ".windows-agent"
+
+BACKUP_DIR = STATE_DIR / "backups"
+STAMP_FILE = STATE_DIR / "build_stamp.json"
+CODES_STATE_FILE = str(STATE_DIR / "codes_state.json")
+SETTINGS_FILE = STATE_DIR / "settings.json"
 
 # پوشه کدهای ایجنت همکار روی دسکتاپ ساخته می‌شود
 CODES_FOLDER_NAME = "CODES"
@@ -215,10 +235,8 @@ CODES_MAX_RUNTIME = 600
 # None یعنی روی دسکتاپ (با زیرپوشه‌های ScreenShots و logs)
 FALLBACK_BASE_DIR = None
 
-IS_WINDOWS = os.name == "nt"
-
-# مسیر فایل خطاها (کنار خود برنامه) تا اگر برنامه بالا نیامد دلیلش معلوم شود
-ERROR_LOG = Path(__file__).resolve().parent / "error.log"
+# زیرپوشه‌ی خطاها داخل logs گوگل درایو
+ERROR_SUBFOLDER = "errors"
 
 
 # ------------------------------------------------------ تاریخ جلالی / تهران ---
@@ -454,6 +472,46 @@ def resolve_dir(target_setting: str | None, fallback_subfolder: str | None = Non
     if fallback_subfolder:
         base = base / fallback_subfolder
     return base, False
+
+
+def error_dir() -> Path:
+    """پوشه خطاها: گوگل درایو\logs\errors (اگر در دسترس نبود، پوشه وضعیت)."""
+    try:
+        dest, _ = resolve_report_dir()
+        target = Path(dest) / ERROR_SUBFOLDER
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    except OSError:
+        pass
+    except Exception:
+        pass
+    target = STATE_DIR / ERROR_SUBFOLDER
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return target
+
+
+def write_error(context: str, detail: str = "") -> Path | None:
+    """هر خطا یا مشکلی را در فایل خطای همان روز ذخیره می‌کند."""
+    now = tehran_now()
+    name = f"errors_{jalali_date(now).replace('/', '-')}.txt"
+    path = error_dir() / name
+    block = [
+        "=" * 62,
+        f"زمان: {jalali_long(now)} — {now:%H:%M:%S} تهران",
+        f"موضوع: {context}",
+        f"نسخه برنامه: {APP_VERSION}",
+        (detail.rstrip() or "(بدون جزئیات)"),
+        "",
+    ]
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(block) + "\n")
+        return path
+    except OSError:
+        return None
 
 
 def drive_available() -> bool:
@@ -840,6 +898,8 @@ def save_settings(data: dict) -> None:
     try:
         import json
 
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+
         SETTINGS_FILE.write_text(
             json.dumps({k: bool(v) for k, v in data.items()}, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -861,6 +921,7 @@ def save_codes_state(state: dict) -> None:
     try:
         import json
 
+        Path(CODES_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
         Path(CODES_STATE_FILE).write_text(
             json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -1483,7 +1544,7 @@ class AgentApp:
                 try:
                     self.auto_cycle()
                 except Exception:
-                    pass
+                    self.report_error("خطا در دور خودکار", traceback.format_exc())
                 self._watch_stop.wait(SYNC_POLL_SECONDS)
 
         threading.Thread(target=loop, daemon=True).start()
@@ -1555,8 +1616,12 @@ class AgentApp:
         data = repo_zip(owner, repo, branch)
         if not data:
             self._run_on_ui(lambda: self._set_lamp(self.lamp_collab, "bad", "قطع"))
-            if manual:
-                self.log(f"❌ دریافت از {owner}/{repo} ممکن نشد.")
+            self.log(f"❌ دریافت از {owner}/{repo} ممکن نشد.")
+            self.report_error(
+                "دریافت مخزن ایجنت همکار ممکن نشد",
+                f"آدرس: {owner}/{repo} @ {branch}\n"
+                "احتمال: قطع بودن اینترنت، فیلتر بودن گیت‌هاب، یا اشتباه بودن نام مخزن/شاخه.",
+            )
             return []
 
         files = extract_py_files(data)
@@ -1707,7 +1772,11 @@ class AgentApp:
             self.log(f"⚠️ نسخه جدید سالم نیست، اعمال نشد: {exc}")
             return False
 
-        backup = here.with_name(f"app.backup-{datetime.now():%Y%m%d-%H%M%S}.py")
+        try:
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        backup = BACKUP_DIR / f"app.backup-{datetime.now():%Y%m%d-%H%M%S}.py"
         try:
             backup.write_bytes(here.read_bytes())
             here.write_bytes(remote)
@@ -1718,6 +1787,7 @@ class AgentApp:
         try:
             import json
 
+            STAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
             STAMP_FILE.write_text(
                 json.dumps(
                     {
@@ -1845,6 +1915,14 @@ class AgentApp:
 
     # --- لاگ ----------------------------------------------------------------
 
+    def report_error(self, context: str, detail: str = "") -> None:
+        """خطا را در Google Drive\logs\errors ذخیره می‌کند."""
+        path = write_error(context, detail)
+        if path:
+            self.log(f"🗂 خطا در پوشه logs\errors ذخیره شد: {path.name}")
+        else:
+            self.log("⚠️ ذخیره خطا در گوگل درایو ممکن نشد.")
+
     def log(self, message: str) -> None:
         """نوشتن در کادر وضعیت (از هر تردی قابل استفاده است)."""
         self.log_queue.put(message)
@@ -1890,9 +1968,10 @@ class AgentApp:
         def runner() -> None:
             try:
                 job()
-            except Exception as exc:  # noqa: BLE001 - خطا باید در UI دیده شود
+            except Exception as exc:  # noqa: BLE001 - خطا باید دیده شود
                 self.log(f"❌ خطا: {exc}")
                 self.log(traceback.format_exc())
+                self.report_error(f"خطا در «{label}»", traceback.format_exc())
             finally:
                 self.root.after(0, lambda: self._set_busy(False))
 
@@ -1973,17 +2052,16 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        # اگر رابط کاربری بالا نیامد، حداقل دلیلش را ذخیره کن
+        # اگر رابط کاربری بالا نیامد، دلیلش در logs\errors گوگل درایو ذخیره می‌شود
+        path = write_error("برنامه بالا نیامد (خطای شروع)", traceback.format_exc())
+        where = str(path) if path else "ذخیره نشد (گوگل درایو در دسترس نبود)"
         try:
-            with ERROR_LOG.open("a", encoding="utf-8") as fh:
-                fh.write(f"\n==== {datetime.now():%Y-%m-%d %H:%M:%S} ====\n")
-                fh.write(traceback.format_exc())
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"برنامه با خطا بسته شد.\n\nجزئیات ذخیره شد در:\n{where}",
+                "Windows Agent",
+                0x10,
+            )
         except Exception:
             pass
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            "برنامه با خطا بسته شد.\nجزئیات در فایل error.log کنار برنامه ذخیره شد.",
-            "Windows Agent",
-            0x10,
-        )
         sys.exit(1)

@@ -55,7 +55,8 @@ rem fallback: run with a console window (so errors are visible)
 %PY_CMD% "%~dp0app.py"
 if errorlevel 1 (
     echo.
-    echo [ERROR] The app closed with an error. See error.log next to app.py
+    echo [ERROR] The app closed with an error.
+    echo Details are saved in: Google Drive\Windows-Agent-DB\logs\errors
     echo.
     pause
 )
