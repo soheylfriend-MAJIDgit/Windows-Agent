@@ -561,6 +561,181 @@ code {
 .steps { margin: 10px 0 0; padding-inline-start: 20px; color: var(--text-dim); font-size: 13.5px; }
 .steps li { margin-bottom: 6px; }
 
+/* ─────────────────────────────── زیرتب‌ها ─────────────────────────────── */
+
+.subtabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  box-shadow: var(--shadow);
+}
+
+.subtab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: background .15s, color .15s;
+}
+.subtab:hover { color: var(--text); background: var(--surface-2); }
+.subtab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.subtab .count {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--due);
+  color: #0c1622;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.subview { display: none; flex-direction: column; gap: 14px; }
+.subview.active { display: flex; animation: fade .18s ease; }
+
+/* ─────────────────────────────── فرم‌های ربات ─────────────────────────────── */
+
+.fields.two { grid-template-columns: 1fr 1fr; }
+
+textarea, select {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+textarea {
+  direction: rtl;
+  text-align: right;
+  line-height: 1.85;
+  min-height: 76px;
+  resize: vertical;
+  user-select: text;
+}
+select { cursor: pointer; }
+textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 4px 0 14px;
+  padding: 10px 14px;
+  border-radius: 13px;
+  background: var(--surface-2);
+}
+.switch-text { display: flex; flex-direction: column; gap: 0; }
+.switch-text b { font-size: 14.5px; }
+.switch-text b.on { color: var(--accent); }
+.ok-text { color: var(--ok); }
+.err-text { color: var(--danger); }
+.q-meta .chip-line { color: var(--text); font-weight: 600; }
+
+/* ─────────────────────────────── صف پیام‌ها ─────────────────────────────── */
+
+.queue-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+
+.queue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 13px;
+  background: var(--surface-2);
+  border-inline-start: 3px solid var(--border-strong);
+}
+.queue-item.pending { border-inline-start-color: var(--due); }
+.queue-item.sent { border-inline-start-color: var(--ok); }
+.queue-item.failed { border-inline-start-color: var(--danger); }
+
+.q-main { flex: 1 1 auto; min-width: 0; }
+.q-main p {
+  margin: 0;
+  font-size: 13.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.q-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.q-meta .err { color: var(--danger); }
+.q-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.q-actions .btn { padding: 4px 10px; font-size: 12px; }
+
+/* ─────────────────────────────── بلوک کد ─────────────────────────────── */
+
+.code-block {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.code-block pre {
+  margin: 0;
+  padding: 14px;
+  max-height: 430px;
+  overflow: auto;
+  direction: ltr;
+  text-align: left;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.8;
+  user-select: text;
+  scrollbar-width: thin;
+}
+
 /* ── فهرست کدها ── */
 
 .list { display: flex; flex-direction: column; gap: 10px; }
@@ -770,7 +945,8 @@ html[data-theme='light'] .play-btn:hover { color: #fff; }
 
 @media (max-width: 900px) {
   .grid-top { grid-template-columns: 1fr; }
-  .fields { grid-template-columns: 1fr; }
+  .fields, .fields.two { grid-template-columns: 1fr; }
+  .subtab { font-size: 12px; padding: 7px 6px; }
   .header-tools .clock time { font-size: 20px; }
   .tab { font-size: 11.5px; padding: 6px 4px; }
   .brand-text h1 { font-size: 18px; }

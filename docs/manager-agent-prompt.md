@@ -42,14 +42,14 @@
 owner  : soheylfriend-MAJIDgit
 repo   : Windows-Agent
 branch : arena/025c788f-windows-agent
-file   : version.txt   ← محتوای فعلی: 「1.6-2」
+file   : version.txt   ← محتوای فعلی: 「1.7-1」
 ```
 
 ساختار ریپو:
 
 ```
 Windows-Agent/
-├── app.py                    ← همه‌ی منطق + سرور محلی رابط (یک فایل، ~۱۷۰۰ خط)
+├── app.py                    ← همه‌ی منطق + سرور محلی رابط + ربات تلگرام (یک فایل، ~۲۱۰۰ خط)
 ├── run.bat                   ← نصب خودکار کتابخانه‌ها + اجرا
 ├── version.txt               ← نسخه (هر تغییر = نسخه جدید)
 ├── requirements.txt          ← pywebview، Pillow

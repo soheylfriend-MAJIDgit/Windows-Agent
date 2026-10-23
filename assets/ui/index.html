@@ -188,6 +188,179 @@
     </article>
   </section>
 
+  <!-- ─────────────── ربات تلگرام ─────────────── -->
+  <section class="view" data-tab="bot">
+
+    <nav class="subtabs" id="bot-subtabs">
+      <button class="subtab active" type="button" data-sub="settings">تنظیمات</button>
+      <button class="subtab" type="button" data-sub="test">تست</button>
+      <button class="subtab" type="button" data-sub="queue">صف پیام‌ها<em class="count hidden" id="bot-tab-count"></em></button>
+      <button class="subtab" type="button" data-sub="guide">راهنمای ایجنت همکار</button>
+    </nav>
+
+    <!-- ── تنظیمات ── -->
+    <div class="subview active" data-sub="settings">
+      <article class="card">
+        <h2>تنظیمات ربات تلگرام</h2>
+        <p class="muted small">توکن را از <b>@BotFather</b> بگیر. ربات را عضو گروه کن (یا ادمینش کن) و مقصد را بگذار.</p>
+
+        <div class="fields">
+          <label><span>توکن ربات</span>
+            <input id="bot-token" data-bot-field="token" dir="ltr" spellcheck="false" placeholder="123456789:AA...">
+          </label>
+          <label><span>مقصد — chat_id گروه</span>
+            <input id="bot-chat" data-bot-field="chat" dir="ltr" spellcheck="false" placeholder="-1001234567890">
+          </label>
+          <label><span>فاصله بین دو پیام (ثانیه)</span>
+            <input id="bot-gap" data-bot-field="gap" dir="ltr" inputmode="numeric" placeholder="۳">
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <label class="switch" title="روشن/خاموش کردن ارسال صف">
+            <input type="checkbox" id="bot-enabled">
+            <span class="track"><span class="knob"></span></span>
+          </label>
+          <div class="switch-text">
+            <b id="bot-enabled-title">ربات خاموش است</b>
+            <span class="muted small" id="bot-enabled-hint">پیام‌ها در صف می‌مانند تا روشنش کنی.</span>
+          </div>
+        </div>
+
+        <div class="row-actions">
+          <button class="btn btn-primary" id="bot-save">ذخیره</button>
+          <button class="btn" id="bot-check">بررسی توکن</button>
+          <span class="small" id="bot-me"></span>
+        </div>
+
+        <div class="note-box">
+          <p>صف و تنظیمات در <code id="bot-api-file">%LOCALAPPDATA%\Windows-Agent</code> ذخیره می‌شود؛ هیچ فایلی کنار برنامه نوشته نمی‌شود.</p>
+          <p>پیام‌ها با فاصله فرستاده می‌شوند تا تلگرام محدودمان نکند. اگر تلگرام بگوید «زیاد صبر کن»، خودش صبر می‌کند و بعد ادامه می‌دهد.</p>
+        </div>
+      </article>
+    </div>
+
+    <!-- ── تست ── -->
+    <div class="subview" data-sub="test">
+      <article class="card">
+        <h2>تست ارسال</h2>
+        <p class="muted small">یک پیام واقعی به گروه می‌رود تا مطمئن شوی توکن و مقصد درست‌اند. مقصد را خالی بگذار تا از تنظیمات استفاده شود.</p>
+
+        <div class="fields two">
+          <label><span>مقصد (اختیاری)</span>
+            <input id="bot-test-chat" dir="ltr" spellcheck="false" placeholder="همان مقصد تنظیمات">
+          </label>
+          <label><span>متن پیام</span>
+            <input id="bot-test-text" placeholder="✅ پیام تست از ایجنت ویندوز">
+          </label>
+        </div>
+
+        <div class="row-actions">
+          <button class="btn btn-primary" id="bot-test-send">
+            <svg viewBox="0 0 24 24"><path d="M21 4 3 11l6 2.5L11.5 20z"/><path d="M9 13.5 21 4"/></svg>
+            ارسال پیام تست
+          </button>
+          <span class="small" id="bot-test-result"></span>
+        </div>
+      </article>
+    </div>
+
+    <!-- ── صف پیام‌ها ── -->
+    <div class="subview" data-sub="queue">
+      <article class="card">
+        <h2>افزودن پیام به صف</h2>
+        <p class="muted small">ایجنت همکار هم می‌تواند از راه کد پایتونش پیام در این صف بگذارد — راهنمایش در زیرتب «راهنمای ایجنت همکار» است.</p>
+
+        <textarea id="bot-text" rows="3" spellcheck="false" placeholder="متن پیام…"></textarea>
+
+        <div class="fields two">
+          <label><span>مقصد (اختیاری)</span>
+            <input id="bot-msg-chat" dir="ltr" spellcheck="false" placeholder="از تنظیمات">
+          </label>
+          <label><span>زمان ارسال</span>
+            <select id="bot-msg-when">
+              <option value="0">همین حالا</option>
+              <option value="5">۵ دقیقه بعد</option>
+              <option value="30">۳۰ دقیقه بعد</option>
+              <option value="60">۱ ساعت بعد</option>
+              <option value="180">۳ ساعت بعد</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="row-actions">
+          <button class="btn btn-primary" id="bot-add">افزودن به صف</button>
+          <span class="muted small" id="bot-counts"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="head-card">
+          <h2>صف پیام‌ها</h2>
+          <div class="row-actions">
+            <button class="btn btn-ghost" id="bot-clear">پاک کردن تاریخچه</button>
+          </div>
+        </div>
+        <div id="bot-list" class="queue-list"></div>
+        <div id="bot-empty" class="empty-state hidden">
+          <strong>صف خالی است</strong>
+          <span>اولین پیام را از کادر بالا یا از کد ایجنت همکار اضافه کن.</span>
+        </div>
+      </article>
+    </div>
+
+    <!-- ── راهنمای ایجنت همکار ── -->
+    <div class="subview" data-sub="guide">
+      <article class="card">
+        <h2>راهنمای ایجنت همکار</h2>
+        <p class="muted small">این متن را به ایجنت همکار بده. او با همین چند خط می‌تواند پیام بفرستد.</p>
+
+        <ol class="steps">
+          <li>پنل ویندوز باز باشد (ربات در همان برنامه کار می‌کند).</li>
+          <li>توکن و مقصد در زیرتب «تنظیمات» ذخیره شده باشد.</li>
+          <li>آدرس و کلید محلی در فایل <code id="guide-api-file">%LOCALAPPDATA%\Windows-Agent\bot_api.json</code> است؛ کد همیشه اول همان را می‌خواند — هیچ آدرسی را دستی ننویس.</li>
+          <li>پیام یا فوری فرستاده می‌شود (<code>delay=0</code>) یا در صف می‌ماند و بعداً می‌رود (<code>delay=ثانیه</code>). صف خودش با فاصله می‌فرستد.</li>
+        </ol>
+
+        <div class="code-block">
+          <div class="code-head">
+            <span>کد آماده — در فایل .py خودت بگذار</span>
+            <button class="btn btn-ghost small-btn" id="copy-guide" type="button">کپی کد</button>
+          </div>
+<pre id="guide-code">import json, os, urllib.request
+
+CFG = os.path.join(os.environ["LOCALAPPDATA"], "Windows-Agent", "bot_api.json")
+
+def tell(text, delay=0, chat_id=None):
+    """پیام را به صف ربات تلگرام می‌دهد؛ delay=0 یعنی همین حالا."""
+    with open(CFG, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    body = json.dumps({"text": text, "delay": delay, "chat_id": chat_id}).encode("utf-8")
+    req = urllib.request.Request(
+        cfg["send"], data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Agent-Token": cfg["token"]},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+if __name__ == "__main__":
+    print(tell("سلام! این پیام از کد ایجنت همکار است."))
+    print(tell("یادآوری — ۱۰ دقیقه بعد", delay=600))</pre>
+        </div>
+
+        <div class="note-box">
+          <p><b>قواعد مهم:</b></p>
+          <p>• متن هر پیام حداکثر ۴۰۰۰ کاراکتر؛ بلندتر بود خودش کوتاه می‌شود.</p>
+          <p>• <code>delay</code> ثانیه است؛ برای زمان دقیق می‌توانی <code>when</code> (زمان یونیکس) بفرستی.</p>
+          <p>• جواب موفق: <code>{"ok": true, "id": "...", "queued": true}</code> — جواب خطا: <code>{"ok": false, "error": "..."}</code>.</p>
+          <p>• اگر فایل <code>bot_api.json</code> نبود یعنی پنل ویندوز باز نیست؛ آن را خطای واقعی حساب کن و در گزارش بنویس.</p>
+          <p>• وضعیت صف: همان آدرس با مسیر <code>/bot/state</code> و همان کلید.</p>
+          <p>• ربات فقط با فاصله‌ی تنظیم‌شده پیام می‌فرستد؛ پشت سر هم نریز.</p>
+        </div>
+      </article>
+    </div>
+  </section>
+
   <!-- ─────────────── کتابخانه کدها ─────────────── -->
   <section class="view" data-tab="codes">
     <article class="card head-card">
@@ -232,6 +405,10 @@
       <div class="head-card">
         <h2>گزارش زنده</h2>
         <div class="row-actions">
+          <button class="btn btn-ghost" id="btn-copy-log">
+            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M15 5.5A2.5 2.5 0 0 0 12.5 3h-7A2.5 2.5 0 0 0 3 5.5v7A2.5 2.5 0 0 0 5.5 15"/></svg>
+            کپی همه
+          </button>
           <button class="btn btn-ghost" id="btn-clear-log">پاک کردن</button>
           <span class="muted small" id="log-count"></span>
         </div>

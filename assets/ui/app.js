@@ -19,6 +19,7 @@
     { id: 'mother', label: 'ایجنت مادر' },
     { id: 'collab', label: 'ایجنت همکار' },
     { id: 'manage', label: 'ایجنت مدیریت' },
+    { id: 'bot', label: 'ربات تلگرام' },
     { id: 'codes', label: 'کتابخانه کدها' },
     { id: 'shots', label: 'اسکرین‌شات‌ها' },
     { id: 'live', label: 'گزارش زنده' },
@@ -26,6 +27,15 @@
   ];
 
   var CHANGELOG = [
+    {
+      v: '۱.۷', d: '۱۴۰۵/۰۸/۰۲',
+      items: [
+        'تب تازه: «ربات تلگرام» با چهار زیرتب — تنظیمات، تست، صف پیام‌ها، راهنمای ایجنت همکار.',
+        'ایجنت همکار می‌تواند از داخل کد پایتونش پیام در صف بگذارد؛ فوری یا زمان‌دار.',
+        'صف با فاصله‌ی امن پیام‌ها را می‌فرستد و اگر تلگرام محدودیت داد، خودش صبر می‌کند.',
+        'در «گزارش زنده» دکمه‌ی «کپی همه» اضافه شد.'
+      ]
+    },
     {
       v: '۱.۶', d: '۱۴۰۵/۰۸/۰۲',
       items: [
@@ -101,6 +111,43 @@
 
   var SVG_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg>';
 
+  function pad2(n) { return String(n).padStart(2, '0'); }
+
+  function fmtStamp(epoch) {
+    if (!epoch) return '';
+    var d = new Date(epoch * 1000);
+    var j = g2j(d.getFullYear(), d.getMonth() + 1, d.getDate());
+    return fa(j[0] + '/' + pad2(j[1]) + '/' + pad2(j[2])) + ' ' +
+      fa(pad2(d.getHours()) + ':' + pad2(d.getMinutes()));
+  }
+
+  function setVal(id, value) {
+    var el = $(id);
+    if (el && document.activeElement !== el) el.value = value;
+  }
+
+  function copyText(text, label) {
+    function done() { toast(label || 'کپی شد'); play('click'); }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (ok) done(); else toast('کپی ممکن نشد', 'error');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
   /* ─────────────────────────────── صدا ─────────────────────────────── */
 
   var sounds = {};
@@ -121,7 +168,8 @@
   var state = null;
   var activeTab = null;
   var collabDirty = false;
-  var sig = { codes: '', shots: '', log: '', paths: '', chips: '', fields: '' };
+  var botDirty = false;
+  var sig = { codes: '', shots: '', log: '', paths: '', chips: '', fields: '', queue: '' };
   var pendingConfirm = null;
 
   function api() {
@@ -217,6 +265,7 @@
     renderStatus(s);
     renderRepo(s);
     renderManage(s);
+    renderBot(s);
     renderEvents(s.events);
   }
 
@@ -491,6 +540,130 @@
     $('manage-collab').textContent = (collab.owner || '—') + '/' + (collab.repo || '—');
   }
 
+  /* ─────────────────────────── ربات تلگرام ─────────────────────────── */
+
+  function renderBot(s) {
+    var bot = s.bot || {};
+    var q = bot.queue || [];
+    var counts = bot.counts || { pending: 0, sent: 0, failed: 0 };
+
+    if (!botDirty) {
+      setVal('bot-token', bot.token || '');
+      setVal('bot-chat', bot.chat_id || '');
+      setVal('bot-gap', bot.gap || 3);
+      $('bot-enabled').checked = !!bot.enabled;
+    }
+
+    var title = $('bot-enabled-title');
+    title.textContent = bot.enabled ? 'ربات روشن است' : 'ربات خاموش است';
+    title.classList.toggle('on', !!bot.enabled);
+    $('bot-enabled-hint').textContent = bot.enabled
+      ? 'پیام‌های صف با فاصله‌ی ' + fa(bot.gap) + ' ثانیه فرستاده می‌شوند.'
+      : 'پیام‌ها در صف می‌مانند تا روشنش کنی.';
+
+    var meEl = $('bot-me');
+    if (bot.me && bot.me.username) {
+      meEl.textContent = 'ربات: @' + bot.me.username;
+      meEl.className = 'small ok-text';
+    } else if (bot.token && !bot.token_shape_ok) {
+      meEl.textContent = 'شکل توکن درست نیست';
+      meEl.className = 'small err-text';
+    } else if (bot.token) {
+      meEl.textContent = 'توکن ذخیره شده — «بررسی توکن» را بزن';
+      meEl.className = 'small muted';
+    } else {
+      meEl.textContent = 'توکنی ذخیره نشده';
+      meEl.className = 'small muted';
+    }
+
+    $('bot-api-file').textContent = bot.api_file || '—';
+    $('guide-api-file').textContent = (bot.api_file || '—') + ' — پورت ' + fa(bot.api_port || '—');
+
+    $('bot-counts').textContent =
+      'در انتظار: ' + fa(counts.pending) +
+      ' · فرستاده: ' + fa(counts.sent) +
+      ' · ناموفق: ' + fa(counts.failed);
+
+    var badge = $('bot-tab-count');
+    if (counts.pending) {
+      badge.textContent = fa(counts.pending);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+
+    var tested = bot.last_test;
+    var resEl = $('bot-test-result');
+    if (tested) {
+      resEl.textContent = (tested.ok ? '✅ ' : '❌ ') + tested.detail + ' · ' + fa(tested.at || '');
+      resEl.className = 'small ' + (tested.ok ? 'ok-text' : 'err-text');
+    } else {
+      resEl.textContent = '';
+    }
+
+    renderQueue(q);
+  }
+
+  function queueItemHtml(item) {
+    var status = item.status || 'pending';
+    var label = status === 'sent' ? 'فرستاده شد' : (status === 'failed' ? 'ناموفق' : 'در صف');
+    var when = item.send_at ? ('ساعت ' + fmtStamp(item.send_at)) : 'همین حالا';
+    var meta = [
+      '<span>' + (item.created ? fmtStamp(item.created) : '') + '</span>',
+      '<span>' + esc(when) + '</span>',
+      '<span>' + esc(item.source === 'api' ? 'از کد ایجنت همکار' : 'از پنل') + '</span>'
+    ];
+    if (status === 'sent' && item.sent_at) meta.push('<span>فرستاده: ' + fmtStamp(item.sent_at) + '</span>');
+    if (item.error) meta.push('<span class="err">' + esc(item.error) + '</span>');
+
+    var actions = '';
+    if (status === 'pending') {
+      actions = '<button class="btn btn-ghost" type="button" data-qnow="' + esc(item.id) + '">ارسال فوری</button>';
+    }
+    actions += '<button class="btn btn-danger" type="button" data-qdel="' + esc(item.id) + '">حذف</button>';
+
+    return '<div class="queue-item ' + esc(status) + '">' +
+      '<div class="q-main"><p>' + esc(item.text) + '</p>' +
+      '<div class="q-meta"><span class="chip-line">' + label + '</span>' + meta.join('') + '</div></div>' +
+      '<div class="q-actions">' + actions + '</div>' +
+      '</div>';
+  }
+
+  function renderQueue(items) {
+    var list = $('bot-list');
+    var empty = $('bot-empty');
+    if (!list) return;
+    empty.classList.toggle('hidden', items.length > 0);
+
+    var signature = JSON.stringify(items);
+    if (signature === sig.queue) return;
+    sig.queue = signature;
+
+    var ordered = items.slice().reverse();
+    list.innerHTML = ordered.map(queueItemHtml).join('');
+  }
+
+  function saveBotSettings() {
+    var token = $('bot-token').value.trim();
+    var chat = $('bot-chat').value.trim();
+    var gap = $('bot-gap').value.trim() || '3';
+    var enabled = $('bot-enabled').checked;
+    botDirty = false;
+    call('save_bot', [token, chat, enabled, gap]).then(function (res) {
+      handleResult(res, 'save_bot', null);
+    });
+  }
+
+  function setBotSub(name) {
+    Array.prototype.forEach.call(document.querySelectorAll('#bot-subtabs .subtab'), function (b) {
+      b.classList.toggle('active', b.dataset.sub === name);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.view[data-tab="bot"] .subview'), function (v) {
+      v.classList.toggle('active', v.dataset.sub === name);
+    });
+    try { localStorage.setItem('wa.botsub', name); } catch (e) { }
+  }
+
   function renderEvents(events) {
     (events || []).forEach(function (ev) {
       if (!ev) return;
@@ -549,14 +722,22 @@
   }
 
   /* اکشن‌های حساس: اول اجازه می‌گیرند، بعد با confirmed=true صدا زده می‌شوند */
+  function actArgs(action, arg, confirmed) {
+    if (action === 'bot_send_test') return [arg.text, arg.chat_id, confirmed];
+    if (arg === undefined || arg === null) return [confirmed];
+    return [arg, confirmed];
+  }
+
   function act(action, arg) {
-    var args = arg === undefined || arg === null ? [false] : [arg, false];
-    call(action, args).then(function (res) { handleResult(res, action, arg); });
+    call(action, actArgs(action, arg, false)).then(function (res) {
+      handleResult(res, action, arg);
+    });
   }
 
   function actConfirmed(action, arg) {
-    var args = arg === undefined || arg === null ? [true] : [arg, true];
-    call(action, args).then(function (res) { handleResult(res, action, arg); });
+    call(action, actArgs(action, arg, true)).then(function (res) {
+      handleResult(res, action, arg);
+    });
   }
 
   /* ─────────────────────────────── رویدادها ─────────────────────────────── */
@@ -632,6 +813,79 @@
       call('open_shot', [card.dataset.shot]);
     });
 
+    /* ── ربات تلگرام ── */
+    Array.prototype.forEach.call(document.querySelectorAll('#bot-subtabs .subtab'), function (btn) {
+      btn.addEventListener('click', function () { setBotSub(btn.dataset.sub); });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-bot-field]'), function (input) {
+      input.addEventListener('input', function () { botDirty = true; });
+    });
+
+    $('bot-enabled').addEventListener('change', function () {
+      botDirty = false;
+      saveBotSettings();
+    });
+
+    $('bot-save').addEventListener('click', saveBotSettings);
+
+    $('bot-check').addEventListener('click', function () {
+      if (botDirty) { toast('اول دکمه‌ی ذخیره را بزن', 'error'); return; }
+      call('bot_check_token').then(function (res) { handleResult(res, 'bot_check_token', null); });
+    });
+
+    $('bot-test-send').addEventListener('click', function () {
+      if (botDirty) { toast('اول دکمه‌ی ذخیره را بزن', 'error'); return; }
+      act('bot_send_test', {
+        text: $('bot-test-text').value.trim(),
+        chat_id: $('bot-test-chat').value.trim()
+      });
+    });
+
+    $('bot-add').addEventListener('click', function () {
+      var text = $('bot-text').value.trim();
+      if (!text) { toast('متن پیام خالی است', 'error'); return; }
+      var delay = Number($('bot-msg-when').value || 0) * 60;
+      var chat = $('bot-msg-chat').value.trim();
+      call('bot_add', [text, chat, delay]).then(function (res) {
+        $('bot-text').value = '';
+        handleResult(res, 'bot_add', null);
+      });
+    });
+
+    $('bot-clear').addEventListener('click', function () {
+      call('bot_clear_queue', [true]).then(function (res) {
+        handleResult(res, 'bot_clear_queue', null);
+      });
+    });
+
+    $('bot-list').addEventListener('click', function (event) {
+      var nowBtn = event.target.closest('[data-qnow]');
+      if (nowBtn) {
+        call('bot_set_send_at', [nowBtn.dataset.qnow]).then(function (res) {
+          handleResult(res, 'bot_set_send_at', null);
+        });
+        return;
+      }
+      var delBtn = event.target.closest('[data-qdel]');
+      if (delBtn) {
+        call('bot_remove', [delBtn.dataset.qdel]).then(function (res) {
+          handleResult(res, 'bot_remove', null);
+        });
+      }
+    });
+
+    /* کپی گزارش و کپی کد راهنما */
+    $('btn-copy-log').addEventListener('click', function () {
+      var lines = (state && state.logs) || [];
+      if (!lines.length) { toast('گزارشی برای کپی نیست', 'error'); return; }
+      copyText(lines.join('\n'), 'گزارش کپی شد');
+    });
+
+    $('copy-guide').addEventListener('click', function () {
+      copyText($('guide-code').textContent, 'کد کپی شد');
+    });
+
     /* میان‌بر پوشه‌ها */
     document.addEventListener('click', function (event) {
       var link = event.target.closest('[data-open]');
@@ -698,6 +952,10 @@
     buildTabs();
     bind();
     buildChangelog();
+
+    var savedSub = null;
+    try { savedSub = localStorage.getItem('wa.botsub'); } catch (e) { }
+    setBotSub(savedSub === 'test' || savedSub === 'queue' || savedSub === 'guide' ? savedSub : 'settings');
     tickClock();
     setInterval(tickClock, 1000);
     requestAnimationFrame(animateRing);

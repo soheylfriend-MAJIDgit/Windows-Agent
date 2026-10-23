@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۱.۶
+Windows Agent — نسخه ۱.۷
 ------------------------
 رابط کاربری وب‌محور با pywebview (HTML + CSS + JS)
 
   ۱) مغز ایجنت: کلید دستی/خودکار، تایمر دایره‌ای، آمار کدها
   ۲) ایجنت مادر / ایجنت همکار / ایجنت مدیریت
   ۳) کتابخانه کدها با دکمه پخش برای اجرای مجدد
-  ۴) اسکرین‌شات‌ها و گزارش زنده
+  ۴) اسکرین‌شات‌ها و گزارش زنده (با دکمه‌ی کپی)
   ۵) اسکرین‌شات صفحه و گزارش برنامه‌های باز ویندوز
+  ۶) ربات تلگرام: تنظیمات، تست، صف پیام‌ها و راهنمای ایجنت همکار
 
 معماری: بک‌اند پایتون (همین فایل) + یک وب‌سرور محلی روی ۱۲۷.۰.۰.۱
 که صفحه را در یک پنجره‌ی WebView2 نشان می‌دهد. هیچ فایلی کنار برنامه نوشته نمی‌شود.
+
+ربات تلگرام: صف پیام‌ها در %LOCALAPPDATA%\Windows-Agent است و ایجنت همکار
+از راه یک آدرس محلی (127.0.0.1) با کلید موجود در bot_api.json پیام در صف می‌گذارد.
 
 نحوه اجرا: فایل run.bat را دوبار کلیک کنید (کتابخانه‌های لازم را خودش نصب می‌کند).
 """
@@ -33,7 +37,7 @@ from pathlib import Path
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -97,6 +101,11 @@ DEFAULT_SETTINGS = {
     "auto": False,          # یک کلید: خودکار یا دستی
     "theme": "dark",        # dark یا light — پیش‌فرض تاریک
     "theme_set_v16": False,  # یک‌بار در نسخه ۱.۶ تم روی تاریک تنظیم می‌شود
+    # ربات تلگرام
+    "bot_token": "",         # توکن ربات از BotFather
+    "bot_chat_id": "",       # گروهِ مقصد (مثلاً ‎-1001234567890)
+    "bot_enabled": False,    # فرستادن صف روشن/خاموش
+    "bot_gap": 3,            # فاصله‌ی بین دو پیام (ثانیه) تا تلگرام محدودمان نکند
     # مخزن ایجنت مادر (خود برنامه)
     "mother_owner": "soheylfriend-MAJIDgit",
     "mother_repo": "Windows-Agent",
@@ -155,6 +164,23 @@ FALLBACK_BASE_DIR = None
 
 # زیرپوشه‌ی خطاها داخل logs گوگل درایو
 ERROR_SUBFOLDER = "errors"
+
+# ------------------------------------------------------------------
+#  ربات تلگرام
+#    - صف پیام‌ها و تنظیماتش در %LOCALAPPDATA%\Windows-Agent است
+#      (هیچ‌چیز کنار app.py نوشته نمی‌شود)
+#    - ایجنت همکار از راه یک آدرس محلی پیام در صف می‌گذارد؛
+#      آدرس و کلیدش در bot_api.json نوشته می‌شود تا کدهای او بخوانند
+# ------------------------------------------------------------------
+TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
+TELEGRAM_TEXT_LIMIT = 4000      # تلگرام ۴۰۹۶ کاراکتر قبول می‌کند
+BOT_MAX_QUEUE = 500             # بیشتر از این، صف پر است
+BOT_SEND_TIMEOUT = 20.0
+TELEGRAM_DOCS = "https://core.telegram.org/bots/api"
+
+# فایل‌های ربات — همه در %LOCALAPPDATA%\Windows-Agent
+BOT_QUEUE_FILE = STATE_DIR / "telegram_queue.json"
+BOT_API_FILE = STATE_DIR / "bot_api.json"
 
 
 # ------------------------------------------------------ تاریخ جلالی / تهران ---
@@ -712,6 +738,92 @@ def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes | None:
         return None
 
 
+def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> tuple[bool, dict]:
+    """ارسال POST با بدنه‌ی JSON (با پروکسی سیستم). خروجی: (موفق, پاسخ)."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    handlers = []
+    proxy = _system_proxy()
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    opener = urllib.request.build_opener(*handlers)
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "Windows-Agent",
+        },
+        method="POST",
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+            try:
+                return True, json.loads(raw or "{}")
+            except ValueError:
+                return True, {"raw": raw[:400]}
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8", "replace"))
+        except (ValueError, OSError):
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        body.setdefault("description", f"خطای HTTP {exc.code}")
+        return False, body
+    except (urllib.error.URLError, OSError) as exc:
+        return False, {"description": str(exc)}
+
+
+def telegram_call(
+    token: str, method: str, payload: dict | None = None, timeout: float = 20.0
+) -> tuple[bool, dict]:
+    """یک متد Bot API تلگرام را صدا می‌زند. خروجی: (موفق, دیکشنری پاسخ)."""
+    token = (token or "").strip()
+    if not token:
+        return False, {"description": "توکن ربات تنظیم نشده است."}
+    ok, data = _http_post_json(
+        TELEGRAM_API.format(token=token, method=method), payload or {}, timeout
+    )
+    if ok and isinstance(data, dict) and data.get("ok") is False:
+        return False, data
+    return ok, data
+
+
+def telegram_token_shape_ok(token: str) -> bool:
+    """شکل توکن: چند رقم، دو نقطه، سپس حروف/رقم/ـ"""
+    return bool(re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", (token or "").strip()))
+
+
+def write_bot_api_file(port: int, token: str) -> None:
+    """آدرس و کلید محلی ربات را می‌نویسد تا کدهای ایجنت همکار بخوانند."""
+    import json
+
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        BOT_API_FILE.write_text(
+            json.dumps(
+                {
+                    "port": port,
+                    "token": token,
+                    "send": f"http://127.0.0.1:{port}/bot/send",
+                    "state": f"http://127.0.0.1:{port}/bot/state",
+                    "hint": "X-Agent-Token را در هدر بفرست",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def repo_zip(
     owner: str = GITHUB_OWNER, repo: str = GITHUB_REPO, branch: str = GITHUB_BRANCH
 ) -> bytes | None:
@@ -981,6 +1093,7 @@ def check_google_drive() -> tuple[bool, str]:
 #    /shots/...   → اسکرین‌شات‌ها (فقط تصویر، مسیر امن)
 #  بقیه‌ی مسیرها ۴۰۴ می‌شوند. هیچ‌چیز بیرون از این‌ها سرو نمی‌شود.
 
+import json
 import mimetypes
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -998,6 +1111,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args) -> None:  # بی‌صدا
         pass
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._send(status, body, "application/json; charset=utf-8")
 
     # ---------------------------------------------------------------- کمکی ---
 
@@ -1033,6 +1150,59 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return None
         return target
+
+    # ----------------------------------------------------------------- POST ---
+
+    def do_POST(self) -> None:  # noqa: N802
+        """فقط برای ایجنت همکار: گذاشتن پیام در صف ربات تلگرام."""
+        path = self.path.split("?", 1)[0]
+        if path not in ("/bot/send", "/bot/state"):
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+
+        api = getattr(self.server, "api", None)
+        if api is None:
+            self._send_json(503, {"ok": False, "error": "برنامه آماده نیست"})
+            return
+
+        import hmac
+
+        given = self.headers.get("X-Agent-Token", "")
+        if not hmac.compare_digest(given, api.bot_api_token):
+            self._send_json(401, {"ok": False, "error": "کلید محلی درست نیست"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > 100_000:
+            self._send_json(413, {"ok": False, "error": "بدنه‌ی درخواست خیلی بزرگ است"})
+            return
+
+        payload: dict = {}
+        if length:
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+            except (ValueError, OSError):
+                self._send_json(400, {"ok": False, "error": "بدنه‌ی JSON نامعتبر"})
+                return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"ok": False, "error": "بدنه باید یک آبجکت JSON باشد"})
+            return
+
+        if path == "/bot/state":
+            self._send_json(200, {"ok": True, **api.bot_queue_state()})
+            return
+
+        result = api.bot_enqueue(
+            text=payload.get("text"),
+            chat_id=payload.get("chat_id"),
+            delay=payload.get("delay"),
+            when=payload.get("when"),
+            source="api",
+        )
+        self._send_json(200 if result.get("ok") else 400, result)
 
     # ------------------------------------------------------------------ GET ---
 
@@ -1079,10 +1249,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
 
-def start_ui_server() -> tuple[ThreadingHTTPServer, int]:
+def start_ui_server(api: "Api | None" = None) -> tuple[ThreadingHTTPServer, int]:
     """سرور محلی رابط را روی یک پورت آزاد بالا می‌آورد."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     server.daemon_threads = True
+    server.api = api  # type: ignore[attr-defined]
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, port
@@ -1119,12 +1290,24 @@ class Api:
         self.auto_next = 0.0
         # شناسنامه‌ی ساخت یک‌بار خوانده می‌شود (git در هر ۰.۷ ثانیه اجرا نشود)
         self.build = build_info()
+        # --- ربات تلگرام ---
+        import secrets
+
+        self.q_lock = threading.Lock()
+        self.queue: list[dict] = self._load_queue()
+        self.bot_api_token = secrets.token_urlsafe(24)
+        self.bot_me: dict | None = None
+        self.bot_last_test: dict | None = None
+        self.api_port = 0
+        self._last_bot_send = 0.0
+        self._bot_stop = threading.Event()
         self._shots_cache: list[dict] = []
         self._shots_at = 0.0
         self._paths_cache: dict = {}
         self._paths_at = 0.0
         self._scan_codes()
         self._start_status_monitor()
+        self._start_bot_worker()
         if self.settings.get("auto"):
             self._arm_watch()
 
@@ -1180,6 +1363,360 @@ class Api:
     def collab_ready(self) -> bool:
         return all(self.collab_info())
 
+    # ------------------------------------------------------- ربات تلگرام ---
+
+    def _load_queue(self) -> list[dict]:
+        """صف پیام‌ها را از دیسک می‌خواند (خراب باشد، صف خالی)."""
+        try:
+            data = json.loads(BOT_QUEUE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [
+                    item for item in data
+                    if isinstance(item, dict) and str(item.get("text", "")).strip()
+                ]
+        except (OSError, ValueError):
+            pass
+        return []
+
+    def _save_queue(self) -> None:
+        """صف را روی دیسک می‌نویسد (نوشتن اتمیک: tmp سپس replace)."""
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with self.q_lock:
+                data = json.dumps(self.queue[-400:], ensure_ascii=False, indent=1)
+            tmp = BOT_QUEUE_FILE.with_suffix(".tmp")
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(tmp, BOT_QUEUE_FILE)
+        except OSError:
+            pass
+
+    def _queue_counts(self) -> dict:
+        counts = {"pending": 0, "sent": 0, "failed": 0}
+        with self.q_lock:
+            for item in self.queue:
+                status = item.get("status", "pending")
+                counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    def _new_id(self) -> str:
+        return f"m{int(time.time() * 1000) % 100000000}{len(self.queue) % 97:02d}"
+
+    def bot_dict(self) -> dict:
+        """وضعیت ربات برای صفحه."""
+        token = str(self.settings.get("bot_token", "")).strip()
+        with self.q_lock:
+            items = [dict(item) for item in self.queue[-80:]]
+        return {
+            "enabled": bool(self.settings.get("bot_enabled")),
+            "token": token,
+            "token_set": bool(token),
+            "token_shape_ok": telegram_token_shape_ok(token),
+            "chat_id": str(self.settings.get("bot_chat_id", "")).strip(),
+            "gap": int(self.settings.get("bot_gap") or 3),
+            "me": self.bot_me,
+            "last_test": self.bot_last_test,
+            "queue": items,
+            "counts": self._queue_counts(),
+            "api_port": self.api_port,
+            "api_file": str(BOT_API_FILE),
+            "limit": TELEGRAM_TEXT_LIMIT,
+        }
+
+    def bot_queue_state(self) -> dict:
+        """خلاصه‌ی صف برای کدهای ایجنت همکار."""
+        counts = self._queue_counts()
+        with self.q_lock:
+            pending = [
+                {
+                    "id": item.get("id"),
+                    "created": item.get("created", 0),
+                    "send_at": item.get("send_at", 0),
+                    "preview": str(item.get("text", ""))[:60],
+                }
+                for item in self.queue if item.get("status") == "pending"
+            ][:50]
+        return {
+            "enabled": bool(self.settings.get("bot_enabled")),
+            "token_set": bool(str(self.settings.get("bot_token", "")).strip()),
+            "chat_id_set": bool(str(self.settings.get("bot_chat_id", "")).strip()),
+            "counts": counts,
+            "pending": pending,
+        }
+
+    def bot_enqueue(
+        self,
+        text: str | None,
+        chat_id: str | None = None,
+        delay: float | None = None,
+        when: float | None = None,
+        source: str = "panel",
+    ) -> dict:
+        """گذاشتن یک پیام در صف. ایجنت همکار هم از همین راه استفاده می‌کند."""
+        body = (text or "").strip()
+        if not body:
+            return {"ok": False, "error": "متن پیام خالی است"}
+        if len(body) > TELEGRAM_TEXT_LIMIT:
+            body = body[:TELEGRAM_TEXT_LIMIT] + "\n… (پیام کوتاه شد)"
+
+        now = time.time()
+        send_at = 0.0
+        try:
+            if when not in (None, "", 0):
+                send_at = float(when)
+                if send_at <= now:
+                    send_at = 0.0
+            elif delay not in (None, "", 0):
+                send_at = now + max(0.0, float(delay))
+                if send_at <= now:
+                    send_at = 0.0
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "زمان ارسال نامعتبر است"}
+
+        with self.q_lock:
+            if sum(1 for i in self.queue if i.get("status") == "pending") >= BOT_MAX_QUEUE:
+                return {"ok": False, "error": "صف پر است؛ اول پیام‌های قدیمی را پاک کن"}
+            item = {
+                "id": self._new_id(),
+                "text": body,
+                "chat_id": str(chat_id or "").strip(),
+                "created": round(now, 3),
+                "send_at": round(send_at, 3),
+                "status": "pending",
+                "sent_at": 0.0,
+                "error": "",
+                "source": source,
+            }
+            self.queue.append(item)
+        self._save_queue()
+
+        first_line = body.splitlines()[0][:48]
+        when_text = "همین حالا" if send_at == 0 else f"ساعت {time.strftime('%H:%M:%S', time.localtime(send_at))}"
+        self.log(f"📥 پیام تازه در صف ربات ({source}) — {when_text}: {first_line}")
+        if source != "api":
+            self.toast("پیام به صف اضافه شد")
+        return {
+            "ok": True,
+            "id": item["id"],
+            "status": "pending",
+            "send_at": send_at,
+            "queued": True,
+            "note": "" if self.settings.get("bot_enabled") else "صف خاموش است؛ فقط ذخیره شد",
+        }
+
+    def bot_add(self, text: str, chat_id: str = "", delay=0) -> dict:
+        """دکمه‌ی «افزودن به صف» در صفحه."""
+        result = self.bot_enqueue(text, chat_id, delay)
+        if not result.get("ok"):
+            self.toast(result.get("error", "افزودن ممکن نشد"), "error")
+        return self.get_state()
+
+    def bot_set_send_at(self, item_id: str) -> dict:
+        """ارسال فوری: زمان پیام را صفر می‌کند."""
+        found = False
+        with self.q_lock:
+            for item in self.queue:
+                if item.get("id") == item_id and item.get("status") == "pending":
+                    item["send_at"] = 0.0
+                    item["error"] = ""
+                    found = True
+                    break
+        if found:
+            self._save_queue()
+            self.log(f"⏱ پیام {item_id} برای ارسال فوری علامت خورد.")
+            self.toast("در نوبت ارسال فوری")
+        return self.get_state()
+
+    def bot_remove(self, item_id: str) -> dict:
+        with self.q_lock:
+            self.queue = [item for item in self.queue if item.get("id") != item_id]
+        self._save_queue()
+        self.toast("پیام از صف حذف شد")
+        return self.get_state()
+
+    def bot_clear_queue(self, keep_pending: bool = True) -> dict:
+        with self.q_lock:
+            if keep_pending:
+                self.queue = [item for item in self.queue if item.get("status") == "pending"]
+            else:
+                self.queue = []
+        self._save_queue()
+        self.log("🧹 صف ربات پاک شد" + (" (پیام‌های در انتظار ماندند)" if keep_pending else ""))
+        self.toast("صف پاک شد")
+        return self.get_state()
+
+    def save_bot(self, token: str, chat_id: str, enabled: bool, gap) -> dict:
+        """ذخیره‌ی تنظیمات ربات."""
+        token = (token or "").strip()
+        chat_id = str(chat_id or "").strip()
+        try:
+            gap_i = max(1, min(60, int(float(gap))))
+        except (TypeError, ValueError):
+            gap_i = 3
+
+        self.settings["bot_token"] = token
+        self.settings["bot_chat_id"] = chat_id
+        self.settings["bot_enabled"] = bool(enabled)
+        self.settings["bot_gap"] = gap_i
+        save_settings(self.settings)
+        if token and not telegram_token_shape_ok(token):
+            self.toast("شکل توکن درست نیست (باید مثل 123456:ABC-... باشد)", "error")
+
+        self.sound("success")
+        self.log(
+            f"💾 تنظیمات ربات ذخیره شد — {'روشن' if enabled else 'خاموش'}، "
+            f"فاصله {gap_i} ثانیه، مقصد: {chat_id or '—'}"
+        )
+        self.toast("تنظیمات ربات ذخیره شد")
+        return self.get_state()
+
+    def bot_check_token(self) -> dict:
+        """توکن را با getMe امتحان می‌کند."""
+        token = str(self.settings.get("bot_token", "")).strip()
+        if not token:
+            self.toast("اول توکن ربات را بگذار و ذخیره کن", "error")
+            return self.get_state()
+
+        ok, data = telegram_call(token, "getMe", {}, 15.0)
+        result = (data or {}).get("result") or {}
+        if ok and result.get("is_bot"):
+            self.bot_me = {
+                "username": result.get("username", ""),
+                "name": result.get("first_name", ""),
+            }
+            self.log(f"✅ ربات شناسایی شد: @{self.bot_me['username']}")
+            self.sound("success")
+            self.toast(f"ربات: @{self.bot_me['username']}")
+        else:
+            self.bot_me = None
+            desc = (data or {}).get("description") or "پاسخ نامعتبر"
+            self.log(f"❌ توکن کار نکرد: {desc}")
+            self.sound("error")
+            self.toast("توکن درست نیست", "error")
+        return self.get_state()
+
+    def bot_send_test(self, text: str, chat_id: str, confirmed: bool = False) -> dict:
+        """ارسال یک پیام تست به گروه."""
+        body = (text or "").strip() or "✅ پیام تست از ایجنت ویندوز"
+        target = (chat_id or "").strip() or str(self.settings.get("bot_chat_id", "")).strip()
+        if not confirmed and not self.settings.get("auto"):
+            return {
+                "need_confirm": True,
+                "title": "ارسال پیام تست",
+                "message": f"این پیام به «{target or 'مقصد تنظیم‌نشده'}» فرستاده شود؟\n\n{body[:200]}",
+                "action": "bot_send_test",
+            }
+        token = str(self.settings.get("bot_token", "")).strip()
+        if not token or not target:
+            self.bot_last_test = {
+                "ok": False,
+                "at": f"{tehran_now():%H:%M:%S}",
+                "target": target,
+                "detail": "توکن یا مقصد تنظیم نشده است",
+            }
+            self.toast("توکن و مقصد لازم است", "error")
+            self.log("⚠️ ارسال تست ممکن نشد: توکن یا chat_id تنظیم نشده.")
+            return self.get_state()
+
+        ok, data = telegram_call(
+            token,
+            "sendMessage",
+            {"chat_id": target, "text": body, "disable_web_page_preview": True},
+            BOT_SEND_TIMEOUT,
+        )
+        now_text = f"{tehran_now():%H:%M:%S}"
+        if ok and data.get("ok"):
+            self.bot_last_test = {
+                "ok": True, "at": now_text, "target": target,
+                "detail": "پیام فرستاده شد",
+            }
+            self.log(f"✅ پیام تست به {target} فرستاده شد.")
+            self.sound("success")
+            self.toast("پیام تست فرستاده شد")
+        else:
+            desc = (data or {}).get("description") or "پاسخ نامعتبر"
+            self.bot_last_test = {
+                "ok": False, "at": now_text, "target": target,
+                "detail": str(desc)[:200],
+            }
+            self.log(f"❌ ارسال تست ناموفق: {desc}")
+            self.sound("error")
+            self.toast("ارسال تست ناموفق بود", "error")
+        return self.get_state()
+
+    # ------------------------------------------ کارگر ارسال صف ربات ---
+
+    def _start_bot_worker(self) -> None:
+        def loop() -> None:
+            while not self._bot_stop.is_set():
+                try:
+                    self._bot_tick()
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"⚠️ خطای کارگر ربات: {exc}")
+                self._bot_stop.wait(1.0)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _bot_tick(self) -> None:
+        """اگر ربات روشن باشد، نوبتی یک پیام از صف می‌فرستد."""
+        if not self.settings.get("bot_enabled"):
+            return
+        token = str(self.settings.get("bot_token", "")).strip()
+        if not token:
+            return
+
+        gap = max(1, int(self.settings.get("bot_gap") or 3))
+        now = time.time()
+        if now - self._last_bot_send < gap:
+            return
+
+        with self.q_lock:
+            due = None
+            for item in self.queue:
+                if item.get("status") != "pending":
+                    continue
+                if not item.get("send_at") or item["send_at"] <= now:
+                    due = item
+                    break
+        if due is None:
+            return
+
+        target = (due.get("chat_id") or str(self.settings.get("bot_chat_id", ""))).strip()
+        if not target:
+            due["status"] = "failed"
+            due["error"] = "chat_id تنظیم نشده است"
+            self._save_queue()
+            self.log("⚠️ ربات: مقصد (chat_id) تنظیم نشده — پیام کنار گذاشته شد.")
+            self.toast("مقصد ربات تنظیم نشده", "error")
+            return
+
+        self._last_bot_send = now
+        ok, data = telegram_call(
+            token,
+            "sendMessage",
+            {"chat_id": target, "text": due["text"], "disable_web_page_preview": True},
+            BOT_SEND_TIMEOUT,
+        )
+        stamp = f"{tehran_now():%H:%M:%S}"
+        if ok and data.get("ok"):
+            due["status"] = "sent"
+            due["sent_at"] = time.time()
+            due["error"] = ""
+            self.log(f"📨 پیام ربات فرستاده شد → {target} ({stamp})")
+            self.emit("bot_sent", id=due.get("id"))
+        else:
+            desc = str((data or {}).get("description") or "پاسخ نامعتبر")[:200]
+            retry_after = ((data or {}).get("parameters") or {}).get("retry_after")
+            if retry_after:
+                due["send_at"] = time.time() + float(retry_after)
+                due["error"] = f"محدودیت تلگرام — {retry_after} ثانیه صبر"
+                self.log(f"⏳ تلگرام محدودیت داد؛ {retry_after} ثانیه صبر می‌کنیم.")
+            else:
+                due["status"] = "failed"
+                due["error"] = desc
+                self.log(f"❌ ارسال پیام ربات ناموفق: {desc}")
+                self.toast("ارسال پیام ربات ناموفق بود", "error")
+        self._save_queue()
+
     # --------------------------------------------------------------- وضعیت ---
 
     def get_state(self) -> dict:
@@ -1222,6 +1759,7 @@ class Api:
             "collab": dict(zip(("owner", "repo", "branch"), self.collab_info())),
             "paths": self._cached_paths(),
             "auto_accept": auto,   # در حالت خودکار هیچ‌وقت اجازه نمی‌گیرد
+            "bot": self.bot_dict(),
         }
 
     def _cached_shots(self) -> list[dict]:
@@ -1700,8 +2238,10 @@ def main() -> None:
                 pass
         return
 
-    server, port = start_ui_server()
     api = Api()
+    server, port = start_ui_server(api)
+    api.api_port = port
+    write_bot_api_file(port, api.bot_api_token)
     url = f"http://127.0.0.1:{port}/"
 
     options = dict(
@@ -1754,6 +2294,10 @@ def main() -> None:
                 pass
         traceback.print_exc()
     finally:
+        try:
+            api._bot_stop.set()
+        except Exception:
+            pass
         try:
             server.shutdown()
         except Exception:
