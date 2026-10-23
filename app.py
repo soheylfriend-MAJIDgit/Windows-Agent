@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۱.۱
+Windows Agent — نسخه ۱.۲
 ------------------------
 اینجنت مادر می‌نویسد، ایجنت همکار کد پایتون می‌دهد، این برنامه اجرا می‌کند.
 
@@ -35,7 +35,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -56,6 +56,19 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "1.2",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "رابط کاربری کامل بازطراحی شد",
+            "تم تاریک و روشن با کلید تغییر تم در هدر",
+            "فونت وزیرمتن همراه برنامه",
+            "کلید کشویی گرد برای حالت دستی/خودکار",
+            "تب‌های کپسولی، کارت‌ها و نوار وضعیت تازه",
+            "ساعت و تاریخ جلالی زنده در هدر",
+            "مخزن ایجنت مادر در برنامه قابل تنظیم شد",
+        ],
+    ),
     (
         "1.1",
         "۱۴۰۵/۰۸/۰۲",
@@ -207,9 +220,38 @@ CODES_FOLDER_NAME = "CODES"
 # تنظیمات پیش‌فرض — همه چیز دستی است تا خودت روشنش کنی
 DEFAULT_SETTINGS = {
     "auto": False,          # یک کلید: خودکار یا دستی
-    "collab_owner": "soheylfriend-MAJIDgit",                     # مالک مخزن ایجنت همکار
-    "collab_repo": "Windows-Agent-hamkar",                       # نام مخزن ایجنت همکار
-    "collab_branch": "arena/beecb74c-windows-agent-hamkar",      # شاخه‌ای که بررسی می‌شود
+    "theme": "dark",        # dark یا light
+    # مخزن ایجنت مادر (خود برنامه)
+    "mother_owner": "soheylfriend-MAJIDgit",
+    "mother_repo": "Windows-Agent",
+    "mother_branch": "arena/025c788f-windows-agent",
+    # مخزن ایجنت همکار (کدها)
+    "collab_owner": "soheylfriend-MAJIDgit",
+    "collab_repo": "Windows-Agent-hamkar",
+    "collab_branch": "arena/beecb74c-windows-agent-hamkar",
+}
+
+THEMES: dict[str, dict[str, str]] = {
+    "dark": {
+        "bg": "#161511", "surface": "#1e1d17", "surface2": "#26241d",
+        "border": "#34322a", "border_strong": "#46443a",
+        "text": "#eceade", "text_dim": "#a39e8d",
+        "accent": "#3ab5a5", "accent_strong": "#5ecdbc", "accent_soft": "#1d2e2b",
+        "danger": "#e07b74", "danger_soft": "#33211f",
+        "ok": "#4cc696", "ok_soft": "#1c2e26",
+        "warn": "#f08a5d", "warn_soft": "#34211a",
+        "due": "#6fa8e8", "due_soft": "#1c2733",
+    },
+    "light": {
+        "bg": "#f6f5f1", "surface": "#ffffff", "surface2": "#efede7",
+        "border": "#e2dfd6", "border_strong": "#cfccc2",
+        "text": "#23211c", "text_dim": "#6e6a5e",
+        "accent": "#0d7a6f", "accent_strong": "#0a5f57", "accent_soft": "#e1f0ec",
+        "danger": "#b3403a", "danger_soft": "#f9e8e7",
+        "ok": "#1b7f5e", "ok_soft": "#e2f2e8",
+        "warn": "#c2410c", "warn_soft": "#fdece3",
+        "due": "#2c6cb8", "due_soft": "#e4eefb",
+    },
 }
 
 # ------------------------------------------------------------------
@@ -880,16 +922,17 @@ def extract_file(zip_bytes: bytes, path: str) -> bytes | None:
 # ------------------------------------------------- اجراکننده کدهای جانبی ---
 
 def load_settings() -> dict:
-    """تنظیمات کاربر. پیش‌فرض: همه چیز خاموش."""
+    """تنظیمات کاربر؛ مقادیر ذخیره‌شده روی پیش‌فرض‌ها سوار می‌شوند."""
     data = dict(DEFAULT_SETTINGS)
     try:
         import json
 
         raw = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(raw, dict):
-            for key in DEFAULT_SETTINGS:
-                data[key] = bool(raw.get(key, False))
-    except (OSError, ValueError):
+            for key, default in DEFAULT_SETTINGS.items():
+                value = raw.get(key, default)
+                data[key] = value if isinstance(value, type(default)) else default
+    except (OSError, ValueError, TypeError):
         pass
     return data
 
@@ -901,8 +944,7 @@ def save_settings(data: dict) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
 
         SETTINGS_FILE.write_text(
-            json.dumps({k: bool(v) for k, v in data.items()}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except OSError:
         pass
@@ -1052,6 +1094,121 @@ def check_google_drive() -> tuple[bool, str]:
     return False, "در دسترس نیست"
 
 
+# ------------------------------------------------------- پایه‌های ظاهری ---
+
+FR_PRIVATE = 0x10
+
+
+def register_ui_fonts() -> bool:
+    """فونت وزیرمتن کنار برنامه را برای همین نشست ویندوز ثبت می‌کند."""
+    fonts_dir = LOCAL_BASE_DIR / "assets" / "fonts"
+    if not fonts_dir.is_dir():
+        return False
+    ok = False
+    if IS_WINDOWS:
+        try:
+            for ttf in fonts_dir.glob("*.ttf"):
+                if ctypes.windll.gdi32.AddFontResourceExW(str(ttf), FR_PRIVATE, 0):
+                    ok = True
+        except Exception:
+            return False
+    return ok
+
+
+def pick_font_family(root) -> str:
+    """اگر وزیرمتن در دسترس بود از آن، وگرنه بهترین فونت موجود."""
+    try:
+        from tkinter import font as tkfont
+
+        families = {f.lower() for f in tkfont.families(root)}
+    except Exception:
+        families = set()
+    for name in ("vazirmatn", "segoe ui", "tahoma", "dejavu sans", "arial"):
+        if name in families:
+            return {
+                "vazirmatn": "Vazirmatn",
+                "segoe ui": "Segoe UI",
+                "tahoma": "Tahoma",
+                "dejavu sans": "DejaVu Sans",
+                "arial": "Arial",
+            }[name]
+    return "TkDefaultFont"
+
+
+def rounded_rect(canvas, x1, y1, x2, y2, r, **kwargs):
+    """مستطیل با گوشه‌های گرد روی Canvas."""
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    points = [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+class ToggleSwitch(tk.Canvas):
+    """کلید کشویی گرد با انیمیشن کوتاه."""
+
+    def __init__(self, master, value: bool, command, colors: dict, width: int = 62,
+                 height: int = 32) -> None:
+        super().__init__(
+            master, width=width, height=height, highlightthickness=0, bd=0,
+            bg=colors["surface"],
+        )
+        self.colors = colors
+        self.command = command
+        self.value = bool(value)
+        self.w, self.h = width, height
+        self._pos = 1.0 if self.value else 0.0
+        self._draw()
+        self.bind("<Button-1>", self._click)
+
+    def _draw(self) -> None:
+        c = self.colors
+        self.delete("all")
+        off_fill = c["surface2"] if c["bg"] != c["surface2"] else c["border"]
+        on_fill = c["accent"]
+        fill = on_fill if self._pos > 0.5 else off_fill
+        rounded_rect(
+            self, 1, 1, self.w - 1, self.h - 1, (self.h - 2) / 2,
+            fill=fill, outline=c["border_strong"] if self._pos <= 0.5 else c["accent"],
+        )
+        pad = 4
+        r = (self.h - pad * 2) / 2
+        x = pad + r + (self.w - 2 * pad - 2 * r) * self._pos
+        y = self.h / 2
+        self.create_oval(x - r, y - r, x + r, y + r, fill=c["surface"], outline="")
+
+    def _click(self, _event=None) -> None:
+        self.value = not self.value
+        self._animate()
+
+    def _animate(self) -> None:
+        target = 1.0 if self.value else 0.0
+        step = 0.16
+
+        def tick() -> None:
+            if abs(self._pos - target) <= step:
+                self._pos = target
+                self._draw()
+                return
+            self._pos += step if target > self._pos else -step
+            self._draw()
+            try:
+                self.after(12, tick)
+            except Exception:
+                pass
+
+        tick()
+        if self.command:
+            self.command()
+
+    def set_value(self, value: bool) -> None:
+        self.value = bool(value)
+        self._pos = 1.0 if self.value else 0.0
+        self._draw()
+
+
 # ------------------------------------------------------------ رابط کاربری ---
 
 class AgentApp:
@@ -1059,25 +1216,33 @@ class AgentApp:
         self.root = root
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.ui_queue: queue.Queue = queue.Queue()
+        self.log_lines: list[str] = []
         self.busy = False
-
-        root.title(f"{APP_TITLE} — نسخه {APP_VERSION} ({build_info()['commit']})")
-        root.geometry("760x560")
-        root.minsize(640, 460)
-        root.configure(bg="#f4f6fb")
-
-        base_font = ("Segoe UI", 10)
-        self.font_normal = base_font
-        self.font_button = ("Segoe UI", 11, "bold")
+        self._clock_job = None
 
         self.settings = load_settings()
+        self.theme_name = self.settings.get("theme", "dark")
+        if self.theme_name not in THEMES:
+            self.theme_name = "dark"
+        self.c = THEMES[self.theme_name]
+
+        register_ui_fonts()
+        self.fam = pick_font_family(root)
+        self.font_normal = (self.fam, 10)
+        self.font_button = (self.fam, 11, "bold")
+
         self._watch_running = False
         self._watch_stop = threading.Event()
         self._last_version: str | None = None
 
+        root.geometry("900x680")
+        root.minsize(760, 560)
+        root.configure(bg=self.c["bg"])
+
         self._build_ui()
         self.root.after(120, self._drain_log_queue)
         self._start_status_monitor()
+        self._tick_clock()
 
         if self.settings["auto"]:
             self.start_watch()
@@ -1131,357 +1296,434 @@ class AgentApp:
     # --- ساخت رابط -----------------------------------------------------------
 
     def _build_ui(self) -> None:
+        c = self.c
+        fam = self.fam
         self.build = build_info()
-        bg = "#f4f6fb"
 
-        # ---------------------------- هدر ----------------------------
-        header = tk.Frame(self.root, bg="#1f2a44", pady=12)
+        for child in self.root.winfo_children():
+            child.destroy()
+
+        self.root.configure(bg=c["bg"])
+        self.root.title(f"{APP_TITLE} — نسخه {APP_VERSION} ({self.build['commit']})")
+
+        # ------------------------------------------------ هدر ----------------
+        header = tk.Frame(self.root, bg=c["surface"], padx=18, pady=12)
         header.pack(fill="x")
 
-        tk.Label(
-            header,
-            text="🤖  Windows Agent",
-            font=("Segoe UI", 17, "bold"),
-            fg="white",
-            bg="#1f2a44",
-        ).pack()
+        brand = tk.Frame(header, bg=c["surface"])
+        brand.pack(side="right")
 
-        ident = (
-            self.build.get("filehash")
-            or self.build.get("commit")
-            or "?"
+        logo = tk.Canvas(
+            brand, width=46, height=46, bg=c["surface"], highlightthickness=0, bd=0
         )
-        stamp = f"نسخه {to_fa(APP_VERSION)}  ·  شناسه {ident}"
-        tk.Label(
-            header,
-            text=stamp,
-            font=("Segoe UI", 11, "bold"),
-            fg="#9ec3ff",
-            bg="#1f2a44",
-        ).pack(pady=(6, 0))
+        rounded_rect(logo, 2, 2, 44, 44, 14, fill=c["accent"], outline="")
+        logo.create_text(23, 23, text="WA", fill=c["bg"] if self.theme_name == "dark" else "#ffffff",
+                         font=(fam, 12, "bold"))
+        logo.pack(side="right", padx=(0, 12))
 
-        try:
-            jy, jm, jd = (int(part) for part in self.build["date"].split("/"))
-            long_date = f"{to_fa(jd)} {FA_MONTHS[jm - 1]} {to_fa(jy)}"
-        except (ValueError, IndexError):
-            long_date = self.build["date"]
-        date_line = (
-            f"ساخته‌شده: {long_date} — ساعت {to_fa(self.build['time'])} تهران"
+        titles = tk.Frame(brand, bg=c["surface"])
+        titles.pack(side="right")
+        tk.Label(
+            titles, text=APP_TITLE, font=(fam, 15, "bold"),
+            fg=c["text"], bg=c["surface"], anchor="e",
+        ).pack(anchor="e")
+        tk.Label(
+            titles,
+            text=f"نسخه {to_fa(APP_VERSION)}  ·  شناسه {self.build['commit']}",
+            font=(fam, 9), fg=c["text_dim"], bg=c["surface"], anchor="e",
+        ).pack(anchor="e")
+
+        gadgets = tk.Frame(header, bg=c["surface"])
+        gadgets.pack(side="left")
+
+        clock_box = tk.Frame(gadgets, bg=c["surface"])
+        clock_box.pack(side="left", padx=(0, 10))
+        self.clock_label = tk.Label(
+            clock_box, text="", font=(fam, 13, "bold"),
+            fg=c["text"], bg=c["surface"], anchor="e",
         )
-        tk.Label(
-            header,
-            text=date_line,
-            font=("Segoe UI", 9),
-            fg="#c7d0e4",
-            bg="#1f2a44",
-        ).pack(pady=(2, 0))
-
-        # ------------------------ نوار چراغ‌ها ------------------------
-        lamps_bar = tk.Frame(self.root, bg="#e8edf7", pady=6)
-        lamps_bar.pack(fill="x")
-
-        self.lamp_internet = self._make_lamp(lamps_bar, "اینترنت")
-        self.lamp_drive = self._make_lamp(lamps_bar, "گوگل درایو")
-        self.lamp_repo = self._make_lamp(lamps_bar, "مخزن من")
-        self.lamp_collab = self._make_lamp(lamps_bar, "مخزن همکار")
-
-        tk.Label(
-            lamps_bar,
-            text="وضعیت زنده",
-            font=("Segoe UI", 8),
-            fg="#6b7691",
-            bg="#e8edf7",
-        ).pack(side="right", padx=14)
-
-        # ------------------- کلید خودکار / دستی -------------------
-        auto_bar = tk.Frame(self.root, bg="#ffffff", pady=8)
-        auto_bar.pack(fill="x", padx=12, pady=(8, 0))
-
-        self.var_auto = tk.BooleanVar(value=self.settings["auto"])
-        self.btn_auto = tk.Button(
-            auto_bar,
-            text="",
-            font=("Tahoma", 11, "bold"),
-            fg="white",
-            relief="flat",
-            cursor="hand2",
-            padx=18,
-            pady=10,
-            command=self.action_toggle_auto,
+        self.clock_label.pack(anchor="e")
+        self.date_label = tk.Label(
+            clock_box, text="", font=(fam, 9),
+            fg=c["text_dim"], bg=c["surface"], anchor="e",
         )
-        self.btn_auto.pack(side="right")
+        self.date_label.pack(anchor="e")
+
+        self.theme_btn = tk.Button(
+            gadgets,
+            text="☀" if self.theme_name == "dark" else "🌙",
+            font=(fam, 13),
+            bg=c["surface2"], fg=c["text"],
+            activebackground=c["border"], activeforeground=c["text"],
+            relief="flat", bd=0, cursor="hand2", padx=10, pady=2,
+            command=self.toggle_theme,
+        )
+        self.theme_btn.pack(side="left")
+
+        # ------------------------------------------------ تب‌ها ----------------
+        tabbar = tk.Frame(self.root, bg=c["bg"], padx=16, pady=10)
+        tabbar.pack(fill="x")
+
+        pillbox = tk.Frame(tabbar, bg=c["surface2"], padx=5, pady=5)
+        pillbox.pack(side="right")
+
+        self.tab_buttons: dict[str, tk.Button] = {}
+        self.tab_pages: dict[str, tk.Frame] = {}
+
+        for key, label in (
+            ("main", "عملیات"),
+            ("collab", "ایجنت همکار"),
+            ("changes", "آخرین تغییرات"),
+        ):
+            btn = tk.Button(
+                pillbox, text=label, font=(fam, 10, "bold"),
+                relief="flat", bd=0, cursor="hand2", padx=18, pady=7,
+                command=lambda k=key: self._switch_tab(k),
+            )
+            btn.pack(side="right", padx=2)
+            self.tab_buttons[key] = btn
+
+        body = tk.Frame(self.root, bg=c["bg"], padx=16)
+        body.pack(fill="both", expand=True)
+
+        for key in ("main", "collab", "changes"):
+            self.tab_pages[key] = tk.Frame(body, bg=c["bg"])
+
+        self._build_page_main(self.tab_pages["main"])
+        self._build_page_collab(self.tab_pages["collab"])
+        self._build_page_changes(self.tab_pages["changes"])
+
+        # ------------------------------------------------ نوار وضعیت ----------------
+        status = tk.Frame(self.root, bg=c["surface"], padx=16, pady=8)
+        status.pack(fill="x", side="bottom")
+
+        lamps = tk.Frame(status, bg=c["surface"])
+        lamps.pack(side="right")
+
+        self.lamp_internet = self._make_lamp(lamps, "اینترنت")
+        self.lamp_drive = self._make_lamp(lamps, "گوگل درایو")
+        self.lamp_repo = self._make_lamp(lamps, "مخزن مادر")
+        self.lamp_collab = self._make_lamp(lamps, "مخزن همکار")
 
         tk.Label(
-            auto_bar,
-            text="در حالت دستی هر مرحله اجازه می‌گیرد؛ در حالت خودکار همه چیز خودکار است.",
-            font=("Tahoma", 9),
-            bg="#ffffff",
-            fg="#3b4763",
-            anchor="e",
-        ).pack(side="right", padx=12)
+            status,
+            text=f"فایل: {Path(__file__).resolve()}",
+            font=(fam, 8), fg=c["text_dim"], bg=c["surface"], anchor="w",
+        ).pack(side="left")
 
         self._refresh_auto_button()
+        self._switch_tab("main")
 
-        # ------------------------- تب‌ها -------------------------
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("TNotebook", background=bg, borderwidth=0)
-        style.configure(
-            "TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(18, 8)
+    # ------------------------------------------------- صفحه‌ها ----------------
+
+    def _card(self, parent) -> tuple[tk.Frame, tk.Frame]:
+        """یک کارت گرد با حاشیه ظریف."""
+        c = self.c
+        outer = tk.Frame(
+            parent, bg=c["surface"], bd=0,
+            highlightbackground=c["border"], highlightthickness=1,
         )
+        inner = tk.Frame(outer, bg=c["surface"], padx=16, pady=14)
+        inner.pack(fill="both", expand=True)
+        return outer, inner
 
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=12, pady=(8, 4))
-        self.notebook = notebook
+    def _build_page_main(self, page: tk.Frame) -> None:
+        c = self.c
+        fam = self.fam
 
-        # ---------- تب ۱: عملیات ----------
-        tab_main = tk.Frame(notebook, bg=bg)
-        notebook.add(tab_main, text="  عملیات  ")
+        # --- کارت کلید خودکار / دستی ---
+        outer, inner = self._card(page)
+        outer.pack(fill="x", pady=(0, 10))
 
-        buttons_frame = tk.Frame(tab_main, bg=bg, pady=12)
-        buttons_frame.pack(fill="x", padx=6)
+        row = tk.Frame(inner, bg=c["surface"])
+        row.pack(fill="x")
+
+        self.auto_title = tk.Label(
+            row, text="", font=(fam, 11, "bold"),
+            fg=c["text"], bg=c["surface"], anchor="e",
+        )
+        self.auto_title.pack(side="right")
+
+        self.switch_auto = ToggleSwitch(
+            row, value=self.settings["auto"], command=self.action_toggle_auto,
+            colors=c,
+        )
+        self.switch_auto.pack(side="left")
+
+        self.auto_hint = tk.Label(
+            inner, text="", font=(fam, 9), fg=c["text_dim"], bg=c["surface"],
+            anchor="e", justify="right", wraplength=720,
+        )
+        self.auto_hint.pack(fill="x", pady=(8, 0))
+
+        # --- کارت دکمه‌ها ---
+        outer, inner = self._card(page)
+        outer.pack(fill="x", pady=(0, 10))
+        btns = tk.Frame(inner, bg=c["surface"])
+        btns.pack(fill="x")
 
         self.btn_capture = tk.Button(
-            buttons_frame,
-            text="📸  باز کردن سایت و گرفتن اسکرین‌شات",
-            font=self.font_button,
-            bg="#2f6fed",
-            fg="white",
-            activebackground="#255bc4",
-            activeforeground="white",
-            relief="flat",
-            cursor="hand2",
-            pady=14,
+            btns, text="📸   باز کردن سایت و گرفتن اسکرین‌شات",
+            font=(fam, 11, "bold"), bg=c["accent"], fg=c["bg"] if self.theme_name == "dark" else "#ffffff",
+            activebackground=c["accent_strong"],
+            activeforeground=c["bg"] if self.theme_name == "dark" else "#ffffff",
+            relief="flat", bd=0, cursor="hand2", padx=18, pady=14,
             command=self.action_capture,
         )
         self.btn_capture.pack(side="right", expand=True, fill="x", padx=(0, 8))
 
         self.btn_report = tk.Button(
-            buttons_frame,
-            text="📋  گزارش برنامه‌های باز",
-            font=self.font_button,
-            bg="#2e9e6b",
-            fg="white",
-            activebackground="#268158",
-            activeforeground="white",
-            relief="flat",
-            cursor="hand2",
-            pady=14,
+            btns, text="📋   گزارش برنامه‌های باز",
+            font=(fam, 11, "bold"), bg=c["surface2"], fg=c["text"],
+            activebackground=c["border"], activeforeground=c["text"],
+            relief="flat", bd=0, cursor="hand2", padx=18, pady=14,
+            highlightbackground=c["border_strong"], highlightthickness=1,
             command=self.action_report,
         )
         self.btn_report.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
-        log_frame = tk.LabelFrame(
-            tab_main,
-            text="  وضعیت  ",
-            font=("Segoe UI", 9, "bold"),
-            bg=bg,
-            fg="#3b4763",
-            bd=1,
-            relief="solid",
-        )
-        log_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        # --- کارت لاگ ---
+        outer, inner = self._card(page)
+        outer.pack(fill="both", expand=True)
+
+        head = tk.Frame(inner, bg=c["surface"])
+        head.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            head, text="گزارش زنده", font=(fam, 10, "bold"),
+            fg=c["text"], bg=c["surface"], anchor="e",
+        ).pack(side="right")
 
         self.log_box = scrolledtext.ScrolledText(
-            log_frame,
-            wrap="word",
-            font=("Consolas", 10),
-            bg="#ffffff",
-            fg="#1f2a44",
-            relief="flat",
-            padx=10,
-            pady=8,
+            inner, wrap="word", font=(fam, 9),
+            bg=c["surface2"], fg=c["text"], relief="flat",
+            insertbackground=c["text"], padx=12, pady=10,
+            highlightthickness=1, highlightbackground=c["border"],
         )
-        self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
-        self.log_box.configure(state="disabled")
-        self.log_box.tag_configure("fa", font=("Tahoma", 10))
+        self.log_box.pack(fill="both", expand=True)
 
-        # ---------- تب ۲: آخرین تغییرات ----------
-        tab_changes = tk.Frame(notebook, bg=bg)
-        notebook.add(tab_changes, text="  آخرین تغییرات  ")
+    def _repo_card(
+        self, parent, title: str, prefix: str, hint: str
+    ) -> dict[str, tk.Entry]:
+        c = self.c
+        fam = self.fam
 
-        self.changes_box = scrolledtext.ScrolledText(
-            tab_changes,
-            wrap="word",
-            font=("Tahoma", 10),
-            bg="#ffffff",
-            fg="#1f2a44",
-            relief="flat",
-            padx=14,
-            pady=12,
-        )
-        self.changes_box.pack(fill="both", expand=True, padx=6, pady=6)
-        self.changes_box.insert("end", self._changelog_text())
-        self.changes_box.configure(state="disabled")
-
-        # ---------- تب ۳: ایجنت همکار ----------
-        tab_codes = tk.Frame(notebook, bg=bg)
-        notebook.add(tab_codes, text="  ایجنت همکار  ")
-
-        # --- تنظیمات مخزن ---
-        repo_row = tk.LabelFrame(
-            tab_codes,
-            text="  مخزن ایجنت همکار  ",
-            font=("Tahoma", 9, "bold"),
-            bg=bg,
-            fg="#3b4763",
-            bd=1,
-            relief="solid",
-            pady=6,
-        )
-        repo_row.pack(fill="x", padx=6, pady=(6, 0))
-
-        owner, repo_name, branch_name = self.collab_info()
-
-        self.ent_owner = tk.Entry(repo_row, font=("Consolas", 10), justify="right", width=22)
-        self.ent_owner.insert(0, owner)
-        self.ent_owner.pack(side="right", padx=4)
+        outer, inner = self._card(parent)
+        outer.pack(fill="x", pady=(0, 10))
 
         tk.Label(
-            repo_row, text="مالک (owner)", font=("Tahoma", 9), bg=bg, fg="#3b4763"
-        ).pack(side="right")
-
-        self.ent_repo = tk.Entry(repo_row, font=("Consolas", 10), justify="right", width=18)
-        self.ent_repo.insert(0, repo_name)
-        self.ent_repo.pack(side="right", padx=(12, 4))
-
+            inner, text=title, font=(fam, 10, "bold"),
+            fg=c["text"], bg=c["surface"], anchor="e",
+        ).pack(anchor="e")
         tk.Label(
-            repo_row, text="مخزن (repo)", font=("Tahoma", 9), bg=bg, fg="#3b4763"
-        ).pack(side="right")
+            inner, text=hint, font=(fam, 8), fg=c["text_dim"],
+            bg=c["surface"], anchor="e", justify="right", wraplength=720,
+        ).pack(anchor="e", pady=(2, 10))
 
-        self.ent_branch = tk.Entry(repo_row, font=("Consolas", 10), justify="right", width=14)
-        self.ent_branch.insert(0, branch_name)
-        self.ent_branch.pack(side="right", padx=(12, 4))
+        fields = tk.Frame(inner, bg=c["surface"])
+        fields.pack(fill="x")
 
-        tk.Label(
-            repo_row, text="شاخه (branch)", font=("Tahoma", 9), bg=bg, fg="#3b4763"
-        ).pack(side="right")
-
-        tk.Button(
-            repo_row,
-            text="💾 ذخیره",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            bg="#5c6b8a",
-            fg="white",
-            activebackground="#4a5773",
-            activeforeground="white",
-            cursor="hand2",
-            padx=10,
-            command=self.action_save_collab,
-        ).pack(side="left", padx=6)
-
-        # --- دکمه‌های مرحله‌ای ---
-        action_row = tk.Frame(tab_codes, bg=bg, pady=8)
-        action_row.pack(fill="x", padx=6)
-
-        tk.Button(
-            action_row,
-            text="▶️  اجرای کدهای جدید",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            bg="#2e9e6b",
-            fg="white",
-            activebackground="#268158",
-            activeforeground="white",
-            cursor="hand2",
-            padx=14,
-            pady=6,
-            command=self.action_run_new,
-        ).pack(side="right", padx=4)
+        entries: dict[str, tk.Entry] = {}
+        for key, label, width in (
+            ("owner", "مالک", 20),
+            ("repo", "مخزن", 20),
+            ("branch", "شاخه", 28),
+        ):
+            col = tk.Frame(fields, bg=c["surface"])
+            col.pack(side="right", padx=(0, 12))
+            tk.Label(
+                col, text=label, font=(fam, 8), fg=c["text_dim"],
+                bg=c["surface"], anchor="e",
+            ).pack(anchor="e")
+            entry = tk.Entry(
+                col, font=(fam, 10), width=width, justify="right",
+                bg=c["surface2"], fg=c["text"],
+                insertbackground=c["text"], relief="flat",
+                highlightthickness=1, highlightbackground=c["border"],
+                highlightcolor=c["accent"],
+            )
+            entry.insert(0, str(self.settings.get(f"{prefix}_{key}", "")))
+            entry.pack(ipady=4, pady=(2, 0))
+            entries[key] = entry
 
         tk.Button(
-            action_row,
-            text="📥  بررسی مخزن همکار",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            bg="#2f6fed",
-            fg="white",
-            activebackground="#255bc4",
-            activeforeground="white",
-            cursor="hand2",
-            padx=14,
-            pady=6,
+            inner, text="💾  ذخیره", font=(fam, 9, "bold"),
+            bg=c["surface2"], fg=c["text"],
+            activebackground=c["border"], activeforeground=c["text"],
+            relief="flat", bd=0, cursor="hand2", padx=14, pady=5,
+            highlightbackground=c["border_strong"], highlightthickness=1,
+            command=lambda p=prefix: self.action_save_repo(p),
+        ).pack(anchor="e", pady=(10, 0))
+
+        return entries
+
+    def _build_page_collab(self, page: tk.Frame) -> None:
+        c = self.c
+        fam = self.fam
+
+        self.entries_mother = self._repo_card(
+            page,
+            "مخزن ایجنت مادر (خود برنامه)",
+            "mother",
+            "از این مخزن، نسخه تازه‌ی خود برنامه گرفته می‌شود.",
+        )
+        self.entries_collab = self._repo_card(
+            page,
+            "مخزن ایجنت همکار (کدها)",
+            "collab",
+            "فایل‌های پایتون این مخزن در پوشه CODES روی دسکتاپ ذخیره و اجرا می‌شوند.",
+        )
+
+        outer, inner = self._card(page)
+        outer.pack(fill="x", pady=(0, 10))
+        row = tk.Frame(inner, bg=c["surface"])
+        row.pack(fill="x")
+
+        self.btn_check = tk.Button(
+            row, text="📥  بررسی مخزن همکار", font=(fam, 10, "bold"),
+            bg=c["accent"], fg=c["bg"] if self.theme_name == "dark" else "#ffffff",
+            activebackground=c["accent_strong"],
+            activeforeground=c["bg"] if self.theme_name == "dark" else "#ffffff",
+            relief="flat", bd=0, cursor="hand2", padx=16, pady=8,
             command=self.action_check_collab,
-        ).pack(side="right", padx=4)
+        )
+        self.btn_check.pack(side="right")
+
+        self.btn_run = tk.Button(
+            row, text="▶️  اجرای کدهای جدید", font=(fam, 10, "bold"),
+            bg=c["surface2"], fg=c["text"],
+            activebackground=c["border"], activeforeground=c["text"],
+            relief="flat", bd=0, cursor="hand2", padx=16, pady=8,
+            highlightbackground=c["border_strong"], highlightthickness=1,
+            command=self.action_run_new,
+        )
+        self.btn_run.pack(side="right", padx=8)
 
         self.codes_status = tk.Label(
-            action_row,
-            text="در انتظار دستور شما",
-            font=("Tahoma", 9, "bold"),
-            bg=bg,
-            fg="#8a93a6",
-            anchor="w",
+            row, text="در انتظار دستور شما", font=(fam, 9, "bold"),
+            fg=c["text_dim"], bg=c["surface"], anchor="w",
         )
         self.codes_status.pack(side="left", padx=8)
 
+        outer, inner = self._card(page)
+        outer.pack(fill="both", expand=True)
+
         self.codes_box = scrolledtext.ScrolledText(
-            tab_codes,
-            wrap="word",
-            font=("Tahoma", 10),
-            bg="#ffffff",
-            fg="#1f2a44",
-            relief="flat",
-            padx=10,
-            pady=8,
+            inner, wrap="word", font=(fam, 9),
+            bg=c["surface2"], fg=c["text"], relief="flat",
+            insertbackground=c["text"], padx=12, pady=10,
+            highlightthickness=1, highlightbackground=c["border"],
         )
-        self.codes_box.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.codes_box.pack(fill="both", expand=True)
         self.codes_box.insert("end", self._codes_summary())
         self.codes_box.configure(state="disabled")
 
-        # ------------------------- پاصفحه -------------------------
-        footer = tk.Label(
-            self.root,
-            text=f"فایل در حال اجرا: {Path(__file__).resolve()}",
-            font=("Segoe UI", 8),
-            fg="#6b7691",
-            bg=bg,
-        )
-        footer.pack(pady=(0, 6))
+    def _build_page_changes(self, page: tk.Frame) -> None:
+        c = self.c
+        fam = self.fam
 
+        outer, inner = self._card(page)
+        outer.pack(fill="both", expand=True)
+
+        self.changes_box = scrolledtext.ScrolledText(
+            inner, wrap="word", font=(fam, 9),
+            bg=c["surface2"], fg=c["text"], relief="flat",
+            insertbackground=c["text"], padx=12, pady=10,
+            highlightthickness=1, highlightbackground=c["border"],
+        )
+        self.changes_box.pack(fill="both", expand=True)
+        self.changes_box.insert("end", self._changelog_text())
+        self.changes_box.configure(state="disabled")
+
+    # ------------------------------------------------- رفتار رابط ----------------
+
+    def _switch_tab(self, key: str) -> None:
+        c = self.c
+        on_accent = c["bg"] if self.theme_name == "dark" else "#ffffff"
+        for page_key, page in self.tab_pages.items():
+            page.pack_forget()
+        self.tab_pages[key].pack(fill="both", expand=True)
+
+        for btn_key, btn in self.tab_buttons.items():
+            if btn_key == key:
+                btn.configure(bg=c["accent"], fg=on_accent, activebackground=c["accent"])
+            else:
+                btn.configure(
+                    bg=c["surface2"], fg=c["text_dim"], activebackground=c["border"]
+                )
+        self.current_tab = key
+
+    def toggle_theme(self) -> None:
+        self.theme_name = "light" if self.theme_name == "dark" else "dark"
+        self.c = THEMES[self.theme_name]
+        self.settings["theme"] = self.theme_name
+        save_settings(self.settings)
+        self._build_ui()
+        self._render_log()
         self._refresh_auto_button()
+        self.refresh_codes_box()
+        self.log(f"🎨 تم {'تاریک' if self.theme_name == 'dark' else 'روشن'} شد.")
+
+    def _render_log(self) -> None:
+        if not getattr(self, "log_box", None):
+            return
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.insert("end", "\n".join(self.log_lines[-400:]))
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _tick_clock(self) -> None:
+        try:
+            now = tehran_now()
+            jy, jm, jd = jalali_parts(now)
+            self.date_label.configure(
+                text=f"{to_fa(str(jd))} {FA_MONTHS[jm - 1]} {to_fa(str(jy))}"
+            )
+            self.clock_label.configure(text=to_fa(f"{now:%H:%M:%S}"))
+        except Exception:
+            pass
+        self._clock_job = self.root.after(1000, self._tick_clock)
 
     # --- چراغ‌های وضعیت ------------------------------------------------------
 
     def _make_lamp(self, parent, title: str) -> dict:
-        bg = "#e8edf7"
-        box = tk.Frame(parent, bg=bg)
-        box.pack(side="right", padx=10)
+        c = self.c
+        box = tk.Frame(parent, bg=c["surface"])
+        box.pack(side="right", padx=(14, 0))
 
         canvas = tk.Canvas(
-            box, width=14, height=14, bg=bg, highlightthickness=0, bd=0
+            box, width=10, height=10, bg=c["surface"], highlightthickness=0, bd=0
         )
-        dot = canvas.create_oval(1, 1, 13, 13, fill="#9aa4b8", outline="")
-        canvas.pack(side="right", padx=(4, 0))
+        dot = canvas.create_oval(1, 1, 9, 9, fill=c["border_strong"], outline="")
+        canvas.pack(side="right", padx=(5, 0), pady=(3, 0))
 
         caption = tk.Label(
-            box,
-            text="در حال بررسی…",
-            font=("Segoe UI", 8),
-            bg=bg,
-            fg="#6b7691",
+            box, text="…", font=(self.fam, 8),
+            bg=c["surface"], fg=c["text_dim"],
         )
-        caption.pack(side="right", padx=(6, 0))
+        caption.pack(side="right", padx=(4, 0))
 
         label = tk.Label(
-            box,
-            text=title,
-            font=("Segoe UI", 9, "bold"),
-            bg=bg,
-            fg="#3b4763",
+            box, text=title, font=(self.fam, 8, "bold"),
+            bg=c["surface"], fg=c["text_dim"],
         )
         label.pack(side="right")
 
         return {"canvas": canvas, "dot": dot, "caption": caption}
 
     def _set_lamp(self, lamp: dict, state: str, text: str = "") -> None:
-        colors = {"ok": "#22a06b", "bad": "#d64545", "wait": "#9aa4b8"}
-        lamp["canvas"].itemconfigure(lamp["dot"], fill=colors.get(state, "#9aa4b8"))
+        c = self.c
+        colors = {
+            "ok": c["ok"],
+            "bad": c["danger"],
+            "wait": c["border_strong"],
+        }
+        lamp["canvas"].itemconfigure(lamp["dot"], fill=colors.get(state, c["border_strong"]))
         if text:
-            lamp["caption"].configure(text=text)
+            lamp["caption"].configure(
+                text=text,
+                fg=c["ok"] if state == "ok" else (c["danger"] if state == "bad" else c["text_dim"]),
+            )
 
     def _changelog_text(self) -> str:
         lines = [
@@ -1562,7 +1804,7 @@ class AgentApp:
     # --- کلید خودکار / دستی ---------------------------------------------------
 
     def action_toggle_auto(self) -> None:
-        self.settings["auto"] = bool(self.var_auto.get())
+        self.settings["auto"] = bool(self.switch_auto.value)
         save_settings(self.settings)
 
         if self.settings["auto"]:
@@ -1575,18 +1817,22 @@ class AgentApp:
         self._refresh_auto_button()
 
     def _refresh_auto_button(self) -> None:
+        c = self.c
         auto = self.settings["auto"]
-        if auto:
-            self.btn_auto.configure(
-                text="⚡  حالت خودکار — کلیک کن تا دستی شود",
-                bg="#2e9e6b",
-                activebackground="#268158",
+        if getattr(self, "switch_auto", None):
+            self.switch_auto.set_value(auto)
+        if getattr(self, "auto_title", None):
+            self.auto_title.configure(
+                text="⚡  حالت خودکار روشن" if auto else "🔒  حالت دستی",
+                fg=c["accent"] if auto else c["text"],
             )
-        else:
-            self.btn_auto.configure(
-                text="🔒  حالت دستی — کلیک کن تا خودکار شود",
-                bg="#5c6b8a",
-                activebackground="#4a5773",
+        if getattr(self, "auto_hint", None):
+            self.auto_hint.configure(
+                text=(
+                    "بررسی مخزن، ذخیره در پوشه CODES و اجرا، هر ۱۰ ثانیه بدون پرسیدن انجام می‌شود."
+                    if auto
+                    else "هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود؛ برای هر مرحله از تو می‌پرسد."
+                )
             )
 
     # --- مرحله ۱: بررسی و دانلود از مخزن همکار --------------------------------
@@ -1712,8 +1958,15 @@ class AgentApp:
 
     # --- آپدیت خود برنامه (از مخزن خودمان) ------------------------------------
 
+    def mother_info(self) -> tuple[str, str, str]:
+        return (
+            self.settings.get("mother_owner", "").strip(),
+            self.settings.get("mother_repo", "").strip(),
+            self.settings.get("mother_branch", "").strip(),
+        )
+
     def check_app_update(self, manual: bool = True) -> bool:
-        data = repo_zip(GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
+        data = repo_zip(*self.mother_info())
         if not data:
             return False
         version_bytes = extract_file(data, GITHUB_VERSION_FILE)
@@ -1816,21 +2069,24 @@ class AgentApp:
 
     # --- تنظیمات مخزن همکار ---------------------------------------------------
 
-    def action_save_collab(self) -> None:
-        owner = self.ent_owner.get().strip()
-        repo = self.ent_repo.get().strip()
-        branch = self.ent_branch.get().strip()
+    def action_save_repo(self, prefix: str) -> None:
+        entries = self.entries_mother if prefix == "mother" else self.entries_collab
+        owner = entries["owner"].get().strip()
+        repo = entries["repo"].get().strip()
+        branch = entries["branch"].get().strip()
+
         if "/" in owner:
             owner, _, rest = owner.partition("/")
             repo = repo or rest
-        self.settings["collab_owner"] = owner
-        self.settings["collab_repo"] = repo
-        self.settings["collab_branch"] = branch or "main"
+
+        self.settings[f"{prefix}_owner"] = owner
+        self.settings[f"{prefix}_repo"] = repo
+        self.settings[f"{prefix}_branch"] = branch or "main"
         save_settings(self.settings)
+
+        title = "ایجنت مادر" if prefix == "mother" else "ایجنت همکار"
         self.log(
-            "💾 مخزن همکار ذخیره شد: "
-            f"{self.settings['collab_owner']}/{self.settings['collab_repo']}"
-            f" @ {self.settings['collab_branch']}"
+            f"💾 مخزن {title} ذخیره شد: {owner}/{repo} @ {self.settings[f'{prefix}_branch']}"
         )
         self._run_on_ui(self.refresh_codes_box)
 
@@ -1838,13 +2094,17 @@ class AgentApp:
 
     def _codes_summary(self) -> str:
         owner, repo, branch = self.collab_info()
+        m_owner, m_repo, m_branch = self.mother_info()
         codes_dir = get_desktop_dir() / CODES_FOLDER_NAME
         state = load_codes_state()
 
         lines = [
-            "ایجنت همکار",
+            "وضعیت",
             "=" * 58,
-            f"مخزن: {owner}/{repo} @ {branch}" if owner and repo else "مخزن: تنظیم نشده",
+            f"مخزن ایجنت مادر: {m_owner}/{m_repo} @ {m_branch}"
+            if m_owner and m_repo else "مخزن ایجنت مادر: تنظیم نشده",
+            f"مخزن ایجنت همکار: {owner}/{repo} @ {branch}"
+            if owner and repo else "مخزن ایجنت همکار: تنظیم نشده",
             f"پوشه کدها: {codes_dir}",
             f"حالت: {'خودکار' if self.settings['auto'] else 'دستی (با اجازه تو)'}",
             "",
@@ -1925,6 +2185,8 @@ class AgentApp:
 
     def log(self, message: str) -> None:
         """نوشتن در کادر وضعیت (از هر تردی قابل استفاده است)."""
+        self.log_lines.append(message)
+        del self.log_lines[:-600]
         self.log_queue.put(message)
 
     def _drain_log_queue(self) -> None:
