@@ -1,12 +1,13 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title Windows Agent
 
-rem ---------------------------------------------------------------
+rem ===============================================================
 rem  Windows Agent launcher
 rem  Double-click this file to start the app.
-rem ---------------------------------------------------------------
+rem  Required packages are installed automatically on first run.
+rem ===============================================================
 
 rem --- 1) find Python -------------------------------------------------
 set "PY_CMD="
@@ -24,25 +25,50 @@ if not defined PY_CMD (
     exit /b 1
 )
 
-rem --- 2) install the only requirement if needed (Pillow) -------------
-%PY_CMD% -c "import PIL" >nul 2>nul
-if errorlevel 1 (
-    echo Installing required package: Pillow ...
-    %PY_CMD% -m pip install --quiet --disable-pip-version-check Pillow
-    %PY_CMD% -c "import PIL" >nul 2>nul
+rem --- 2) required packages ------------------------------------------
+set "MISSING="
+%PY_CMD% -c "import pygame" >nul 2>nul || set "MISSING=!MISSING! pygame"
+%PY_CMD% -c "import arabic_reshaper" >nul 2>nul || set "MISSING=!MISSING! arabic-reshaper"
+%PY_CMD% -c "import bidi" >nul 2>nul || set "MISSING=!MISSING! python-bidi"
+%PY_CMD% -c "import PIL" >nul 2>nul || set "MISSING=!MISSING! Pillow"
+
+if defined MISSING (
+    echo.
+    echo ============================================================
+    echo   Installing required packages:!MISSING!
+    echo   This happens only once and takes a minute.
+    echo ============================================================
+    echo.
+    %PY_CMD% -m pip install --upgrade pip >nul 2>nul
+    %PY_CMD% -m pip install --disable-pip-version-check!MISSING!
     if errorlevel 1 (
         echo.
-        echo [ERROR] Could not install Pillow automatically.
-        echo Run this command manually:  %PY_CMD% -m pip install Pillow
+        echo [WARN] First attempt failed. Trying with a mirror ...
+        %PY_CMD% -m pip install --disable-pip-version-check --index-url https://pypi.org/simple!MISSING!
+    )
+    rem --- verify again
+    set "STILL="
+    %PY_CMD% -c "import pygame" >nul 2>nul || set "STILL=!STILL! pygame"
+    %PY_CMD% -c "import arabic_reshaper" >nul 2>nul || set "STILL=!STILL! arabic-reshaper"
+    %PY_CMD% -c "import bidi" >nul 2>nul || set "STILL=!STILL! python-bidi"
+    %PY_CMD% -c "import PIL" >nul 2>nul || set "STILL=!STILL! Pillow"
+    if defined STILL (
+        echo.
+        echo [ERROR] Could not install:!STILL!
+        echo Run this command manually, then start again:
+        echo     %PY_CMD% -m pip install pygame arabic-reshaper python-bidi Pillow
+        echo.
+        echo If you use a proxy ^(v2rayN^), make sure it is running.
         echo.
         pause
         exit /b 1
     )
+    echo.
+    echo   All packages are installed.
+    echo.
 )
 
-rem --- 3) run the GUI without a console window ------------------------
-rem  pythonw.exe sits next to python.exe; locating it this way avoids
-rem  the Microsoft Store "python" alias stub.
+rem --- 3) run the GUI without a console window -----------------------
 set "PYW_EXE="
 for /f "delims=" %%i in ('%PY_CMD% -c "import sys,os;print(os.path.join(os.path.dirname(sys.executable),'pythonw.exe'))"') do set "PYW_EXE=%%i"
 
