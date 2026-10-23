@@ -101,6 +101,7 @@ DEFAULT_SETTINGS = {
     "auto": False,          # یک کلید: خودکار یا دستی
     "theme": "dark",        # dark یا light — پیش‌فرض تاریک
     "theme_set_v16": False,  # یک‌بار در نسخه ۱.۶ تم روی تاریک تنظیم می‌شود
+    "sync_seconds": 10,     # هر چند ثانیه یک دور در حالت خودکار (قابل تغییر در صفحه)
     # ربات تلگرام
     "bot_token": "",         # توکن ربات از BotFather
     "bot_chat_id": "",       # گروهِ مقصد (مثلاً ‎-1001234567890)
@@ -738,9 +739,12 @@ def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes | None:
         return None
 
 
-def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> tuple[bool, dict]:
-    """ارسال POST با بدنه‌ی JSON (با پروکسی سیستم). خروجی: (موفق, پاسخ)."""
+def _post_once(
+    url: str, payload: dict, timeout: float, insecure: bool
+) -> tuple[bool, dict, bool]:
+    """یک تلاش POST. خروجی: (موفق, پاسخ, مشکل_گواهی)."""
     import json
+    import ssl
     import urllib.error
     import urllib.request
 
@@ -748,6 +752,12 @@ def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> tuple[boo
     proxy = _system_proxy()
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    if insecure:
+        # بعضی پروکسی‌ها/آنتی‌ویروس‌ها گواهی خودشان را می‌گذارند و زنجیره تأیید نمی‌شود
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=context))
     opener = urllib.request.build_opener(*handlers)
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -764,9 +774,9 @@ def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> tuple[boo
         with opener.open(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8", "replace")
             try:
-                return True, json.loads(raw or "{}")
+                return True, json.loads(raw or "{}"), False
             except ValueError:
-                return True, {"raw": raw[:400]}
+                return True, {"raw": raw[:400]}, False
     except urllib.error.HTTPError as exc:
         try:
             body = json.loads(exc.read().decode("utf-8", "replace"))
@@ -775,9 +785,37 @@ def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> tuple[boo
         if not isinstance(body, dict):
             body = {}
         body.setdefault("description", f"خطای HTTP {exc.code}")
-        return False, body
-    except (urllib.error.URLError, OSError) as exc:
-        return False, {"description": str(exc)}
+        return False, body, False
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            return False, {"description": str(reason or exc)}, True
+        return False, {"description": str(reason or exc)}, False
+    except (ssl.SSLError, OSError) as exc:
+        if isinstance(exc, ssl.SSLError):
+            return False, {"description": str(exc)}, True
+        return False, {"description": str(exc)}, False
+
+
+def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> tuple[bool, dict]:
+    """POST با بدنه‌ی JSON.
+
+    اول با بررسی کامل گواهی تلاش می‌کند؛ اگر گواهی رد شد (پروکسی یا آنتی‌ویروس
+    وسط اتصال می‌ایستد) یک‌بار دیگر بدون بررسی گواهی امتحان می‌کند و
+    پاسخ را با نشانه‌ی _tls_insecure برمی‌گرداند تا در گزارش نوشته شود.
+    """
+    ok, data, cert_problem = _post_once(url, payload, timeout, False)
+    if not cert_problem:
+        return ok, data
+
+    ok2, data2, cert_problem2 = _post_once(url, payload, timeout, True)
+    if isinstance(data2, dict):
+        data2["_tls_insecure"] = True
+    if not ok2 and not isinstance(data2, dict):
+        data2 = {"description": "اتصال امن برقرار نشد"}
+    if cert_problem2 and cert_problem:
+        data2.setdefault("description", data.get("description", ""))
+    return ok2, data2
 
 
 def telegram_call(
@@ -793,6 +831,29 @@ def telegram_call(
     if ok and isinstance(data, dict) and data.get("ok") is False:
         return False, data
     return ok, data
+
+
+def telegram_error_fa(text: str) -> str:
+    """پیام خطای تلگرام را به فارسی قابل‌فهم تبدیل می‌کند."""
+    raw = str(text or "").strip()
+    low = raw.lower()
+    if "certificate" in low or "ssl" in low:
+        return "مشکل گواهی امنیتی (فیلترشکن یا آنتی‌ویروس اتصال را باز می‌کند)."
+    if "unauthorized" in low or "401" in low:
+        return "توکن ربات درست نیست یا باطل شده است."
+    if "chat not found" in low:
+        return "مقصد پیدا نشد — ربات را در گروه عضو کن یا chat_id را درست بگذار."
+    if "bot was kicked" in low or "not enough rights" in low:
+        return "ربات از گروه بیرون شده یا اجازه‌ی نوشتن ندارد."
+    if "chat_id is empty" in low or "chat id is empty" in low:
+        return "مقصد (chat_id) خالی است."
+    if "too many requests" in low or "429" in low:
+        return "تلگرام گفت زیاد فرستادی؛ چند لحظه صبر کن."
+    if "timed out" in low or "timeout" in low or "getaddrinfo" in low:
+        return "اینترنت یا پروکسی جواب نداد."
+    if "connection" in low or "network" in low:
+        return "اتصال به تلگرام برقرار نشد."
+    return raw or "خطای نامشخص"
 
 
 def telegram_token_shape_ok(token: str) -> bool:
@@ -1301,6 +1362,7 @@ class Api:
         self.api_port = 0
         self._last_bot_send = 0.0
         self._bot_stop = threading.Event()
+        self.tls_warned = False
         self._shots_cache: list[dict] = []
         self._shots_at = 0.0
         self._paths_cache: dict = {}
@@ -1389,6 +1451,15 @@ class Api:
             os.replace(tmp, BOT_QUEUE_FILE)
         except OSError:
             pass
+
+    def _note_tls(self, data: dict) -> None:
+        """اگر اتصال ناچاراً بدون بررسی گواهی انجام شد، یک‌بار در گزارش بنویس."""
+        if isinstance(data, dict) and data.get("_tls_insecure") and not self.tls_warned:
+            self.tls_warned = True
+            self.log(
+                "⚠️ گواهی امنیتی تلگرام تأیید نشد (فیلترشکن یا آنتی‌ویروس وسط اتصال است)؛ "
+                "اتصال بدون بررسی گواهی انجام شد."
+            )
 
     def _queue_counts(self) -> dict:
         counts = {"pending": 0, "sent": 0, "failed": 0}
@@ -1577,6 +1648,7 @@ class Api:
             return self.get_state()
 
         ok, data = telegram_call(token, "getMe", {}, 15.0)
+        self._note_tls(data)
         result = (data or {}).get("result") or {}
         if ok and result.get("is_bot"):
             self.bot_me = {
@@ -1588,10 +1660,10 @@ class Api:
             self.toast(f"ربات: @{self.bot_me['username']}")
         else:
             self.bot_me = None
-            desc = (data or {}).get("description") or "پاسخ نامعتبر"
-            self.log(f"❌ توکن کار نکرد: {desc}")
+            raw = (data or {}).get("description") or "پاسخ نامعتبر"
+            self.log(f"❌ توکن کار نکرد: {telegram_error_fa(raw)}")
             self.sound("error")
-            self.toast("توکن درست نیست", "error")
+            self.toast(telegram_error_fa(raw), "error")
         return self.get_state()
 
     def bot_send_test(self, text: str, chat_id: str, confirmed: bool = False) -> dict:
@@ -1623,6 +1695,7 @@ class Api:
             {"chat_id": target, "text": body, "disable_web_page_preview": True},
             BOT_SEND_TIMEOUT,
         )
+        self._note_tls(data)
         now_text = f"{tehran_now():%H:%M:%S}"
         if ok and data.get("ok"):
             self.bot_last_test = {
@@ -1633,14 +1706,15 @@ class Api:
             self.sound("success")
             self.toast("پیام تست فرستاده شد")
         else:
-            desc = (data or {}).get("description") or "پاسخ نامعتبر"
+            raw = str((data or {}).get("description") or "پاسخ نامعتبر")
+            reason = telegram_error_fa(raw)
             self.bot_last_test = {
                 "ok": False, "at": now_text, "target": target,
-                "detail": str(desc)[:200],
+                "detail": reason[:200], "raw": raw[:200],
             }
-            self.log(f"❌ ارسال تست ناموفق: {desc}")
+            self.log(f"❌ ارسال تست ناموفق: {reason} — {raw}")
             self.sound("error")
-            self.toast("ارسال تست ناموفق بود", "error")
+            self.toast(reason, "error")
         return self.get_state()
 
     # ------------------------------------------ کارگر ارسال صف ربات ---
@@ -1696,6 +1770,7 @@ class Api:
             {"chat_id": target, "text": due["text"], "disable_web_page_preview": True},
             BOT_SEND_TIMEOUT,
         )
+        self._note_tls(data)
         stamp = f"{tehran_now():%H:%M:%S}"
         if ok and data.get("ok"):
             due["status"] = "sent"
@@ -1704,7 +1779,7 @@ class Api:
             self.log(f"📨 پیام ربات فرستاده شد → {target} ({stamp})")
             self.emit("bot_sent", id=due.get("id"))
         else:
-            desc = str((data or {}).get("description") or "پاسخ نامعتبر")[:200]
+            desc = telegram_error_fa((data or {}).get("description") or "پاسخ نامعتبر")[:200]
             retry_after = ((data or {}).get("parameters") or {}).get("retry_after")
             if retry_after:
                 due["send_at"] = time.time() + float(retry_after)
@@ -1743,7 +1818,7 @@ class Api:
             "auto": auto,
             "busy": self.busy,
             "auto_remaining": round(remaining, 1),
-            "auto_total": SYNC_POLL_SECONDS,
+            "auto_total": self._auto_total(),
             "logs": logs,
             "events": events,
             "status": {
@@ -1846,6 +1921,30 @@ class Api:
         self.codes_index = items
 
     # ---------------------------------------------------------- دکمه‌ها ---
+
+    def _auto_total(self) -> int:
+        """فاصله‌ی دور خودکار (ثانیه) — بین ۳ و ۶۰۰."""
+        try:
+            value = int(float(self.settings.get("sync_seconds") or SYNC_POLL_SECONDS))
+        except (TypeError, ValueError):
+            value = SYNC_POLL_SECONDS
+        return max(3, min(600, value))
+
+    def set_sync_seconds(self, value) -> dict:
+        """تغییر فاصله‌ی دور خودکار از روی صفحه."""
+        try:
+            seconds = int(float(value))
+        except (TypeError, ValueError):
+            seconds = SYNC_POLL_SECONDS
+        seconds = max(3, min(600, seconds))
+        self.settings["sync_seconds"] = seconds
+        save_settings(self.settings)
+        self.log(f"⏱ فاصله‌ی دور خودکار روی {to_fa(seconds)} ثانیه تنظیم شد.")
+        self.sound("click")
+        self.toast(f"هر {to_fa(seconds)} ثانیه یک دور")
+        if self.settings.get("auto"):
+            self._arm_watch()
+        return self.get_state()
 
     def toggle_auto(self) -> dict:
         enabled = not bool(self.settings.get("auto"))
@@ -2166,7 +2265,7 @@ class Api:
     # -------------------------------------------- حلقه خودکار و وضعیت‌ها ---
 
     def _arm_watch(self) -> None:
-        self.auto_next = time.time() + SYNC_POLL_SECONDS
+        self.auto_next = time.time() + self._auto_total()
         if self._watch_running:
             return
         self._watch_running = True

@@ -33,7 +33,9 @@
         'تب تازه: «ربات تلگرام» با چهار زیرتب — تنظیمات، تست، صف پیام‌ها، راهنمای ایجنت همکار.',
         'ایجنت همکار می‌تواند از داخل کد پایتونش پیام در صف بگذارد؛ فوری یا زمان‌دار.',
         'صف با فاصله‌ی امن پیام‌ها را می‌فرستد و اگر تلگرام محدودیت داد، خودش صبر می‌کند.',
-        'در «گزارش زنده» دکمه‌ی «کپی همه» اضافه شد.'
+        'در «گزارش زنده» دکمه‌ی «کپی همه» اضافه شد.',
+        'فاصله‌ی دور خودکار از خود صفحه قابل تغییر است (پیش‌فرض ۱۰ ثانیه).',
+        'اگر گواهی امنیتی رد شود (فیلترشکن یا آنتی‌ویروس)، ارسال یک‌بار بدون بررسی گواهی تلاش می‌شود.'
       ]
     },
     {
@@ -277,6 +279,7 @@
     var sw = $('auto-switch');
 
     sw.checked = !!s.auto;
+    setVal('sync-seconds', s.auto_total || 10);
     document.body.classList.toggle('busy', !!s.busy);
 
     if (s.busy) {
@@ -760,6 +763,20 @@
 
     $('auto-switch').addEventListener('change', function () {
       call('toggle_auto').then(function (res) { handleResult(res, 'toggle_auto', null); });
+    });
+
+    function applySyncSeconds() {
+      var input = $('sync-seconds');
+      var value = Math.max(3, Math.min(600, parseInt(input.value, 10) || 10));
+      input.value = value;
+      call('set_sync_seconds', [value]).then(function (res) {
+        handleResult(res, 'set_sync_seconds', null);
+      });
+    }
+
+    $('sync-seconds').addEventListener('change', applySyncSeconds);
+    $('sync-seconds').addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') { event.preventDefault(); applySyncSeconds(); }
     });
 
     $('mute-btn').addEventListener('click', function () {

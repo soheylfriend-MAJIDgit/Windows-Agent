@@ -42,7 +42,7 @@
 owner  : soheylfriend-MAJIDgit
 repo   : Windows-Agent
 branch : arena/025c788f-windows-agent
-file   : version.txt   ← محتوای فعلی: 「1.7-1」
+file   : version.txt   ← محتوای فعلی: 「1.7-2」
 ```
 
 ساختار ریپو:
@@ -146,6 +146,7 @@ Windows-Agent-hamkar/
   "auto": false,
   "theme": "dark",
   "muted": false,
+  "sync_seconds": 10,
   "mother_owner": "soheylfriend-MAJIDgit",
   "mother_repo": "Windows-Agent",
   "mother_branch": "arena/025c788f-windows-agent",

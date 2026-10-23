@@ -366,6 +366,33 @@ html[data-theme='light'] .tab.active { color: #fff; }
 .state-body strong.on { color: var(--accent); }
 .state-body p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); }
 
+.auto-interval {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.auto-interval input {
+  width: 68px;
+  padding: 4px 6px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: center;
+  direction: ltr;
+  outline: none;
+}
+.auto-interval input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .switch { cursor: pointer; flex: 0 0 auto; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
 .switch .track {

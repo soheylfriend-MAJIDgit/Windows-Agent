@@ -66,6 +66,12 @@
           <span class="label">حالت اجرا</span>
           <strong id="mode-title">دستی</strong>
           <p id="mode-hint">هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود.</p>
+          <div class="auto-interval">
+            <span>هر</span>
+            <input id="sync-seconds" type="number" min="3" max="600" step="1" inputmode="numeric"
+                   aria-label="فاصله‌ی دور خودکار به ثانیه">
+            <span>ثانیه یک دور</span>
+          </div>
         </div>
         <label class="switch" title="حالت دستی / خودکار">
           <input type="checkbox" id="auto-switch">
