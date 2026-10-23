@@ -34,7 +34,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.5"
+APP_VERSION = "0.6"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -55,6 +55,16 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "0.6",
+        "۱۴۰۵/۰۸/۰۱",
+        [
+            "اجراکننده کدهای جانبی داخل خود برنامه (تب «کدها»)",
+            "هر فایل job_*.py در پوشه Codes به‌صورت خودکار شناسایی و اجرا می‌شود",
+            "رفع خطای انکودینگ فارسی در خروجی کدهای اجراشده",
+            "نتیجه هر اجرا در پوشه out ذخیره و در تب کدها نمایش داده می‌شود",
+        ],
+    ),
     (
         "0.5",
         "۱۴۰۵/۰۸/۰۱",
@@ -113,6 +123,23 @@ SCREENSHOT_DIR = DRIVE_BASE_DIR + r"\ScreenShots"
 
 # گزارش‌های txt  →  ...\Windows-Agent-DB\logs
 REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
+
+# کدهایی که Arena می‌فرستد  →  ...\Windows-Agent-DB\Codes
+CODES_DIR = DRIVE_BASE_DIR + r"\Codes"
+
+# نتیجه اجرای کدها  →  ...\Windows-Agent-DB\out
+OUT_DIR = DRIVE_BASE_DIR + r"\out"
+
+# پوشه کدهای اجراشده (تا دوباره اجرا نشوند)
+CODES_DONE_DIR = CODES_DIR + r"\done"
+
+# حافظه اجراکننده (کدام فایل‌ها قبلاً اجرا شده‌اند)
+CODES_STATE_FILE = DRIVE_BASE_DIR + r"\codes_state.json"
+
+# فاصله بررسی پوشه کدها و محدودیت زمان اجرا
+CODES_POLL_SECONDS = 3
+CODES_SETTLE_SECONDS = 4
+CODES_MAX_RUNTIME = 600
 
 # اگر گوگل درایو در دسترس نباشد، این‌ها کجا ذخیره شوند؟
 # None یعنی روی دسکتاپ (با زیرپوشه‌های ScreenShots و logs)
@@ -551,6 +578,131 @@ def save_report(report_text: str, dest_dir: Path) -> Path:
     return target
 
 
+# ------------------------------------------------- اجراکننده کدهای جانبی ---
+
+def _codes_paths() -> tuple[Path, Path, Path, Path]:
+    base = Path(DRIVE_BASE_DIR)
+    return (
+        Path(CODES_DIR),
+        Path(CODES_DONE_DIR),
+        Path(OUT_DIR),
+        Path(CODES_STATE_FILE),
+    )
+
+
+def load_codes_state() -> dict:
+    _, _, _, state_file = _codes_paths()
+    try:
+        import json
+
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_codes_state(state: dict) -> None:
+    _, _, _, state_file = _codes_paths()
+    try:
+        import json
+
+        state_file.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def run_code_job(path: Path) -> tuple[bool, str, str]:
+    """یک فایل job_*.py را اجرا می‌کند.
+
+    خروجی: (موفق بود؟، عنوان، متن نتیجه)
+    """
+    codes_dir, done_dir, out_dir, _ = _codes_paths()
+    started = time.time()
+
+    try:
+        done_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return False, path.name, f"ساخت پوشه ممکن نشد: {exc}"
+
+    target = done_dir / path.name
+    if target.exists():
+        target = done_dir / f"{path.stem}__{int(time.time())}.py"
+    try:
+        path.replace(target)
+    except OSError:
+        try:
+            target.write_bytes(path.read_bytes())
+            path.unlink()
+        except OSError as exc:
+            return False, path.name, f"انتقال فایل ممکن نشد: {exc}"
+
+    env = dict(os.environ)
+    # رفع خطای انکودینگ فارسی در ویندوز (cp1252)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
+    exit_code: int | str = "?"
+    stdout_text = stderr_text = ""
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(target)],
+            cwd=str(out_dir),
+            capture_output=True,
+            timeout=CODES_MAX_RUNTIME,
+            env=env,
+            creationflags=(subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0),
+        )
+        exit_code = completed.returncode
+        stdout_text = completed.stdout.decode("utf-8", errors="replace")
+        stderr_text = completed.stderr.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        exit_code = "TIMEOUT"
+        stderr_text = f"اجرا بیش از {CODES_MAX_RUNTIME} ثانیه طول کشید."
+    except Exception:
+        stderr_text = traceback.format_exc()
+
+    duration = time.time() - started
+    now = tehran_now()
+    ok = exit_code == 0
+
+    text = "\n".join(
+        [
+            "نتیجه اجرای کد Arena",
+            "=" * 58,
+            f"فایل: {path.name}",
+            f"شروع: {jalali_long(now)} — {now:%H:%M:%S} تهران",
+            f"مدت: {duration:.1f} ثانیه",
+            f"کد خروج: {exit_code}",
+            "",
+            "----- خروجی -----",
+            stdout_text.rstrip() or "(خالی)",
+            "",
+            "----- خطاها -----",
+            stderr_text.rstrip() or "(خالی)",
+            "",
+        ]
+    )
+
+    try:
+        (out_dir / f"{target.stem}_result.txt").write_text(text, encoding="utf-8")
+        (out_dir / "last_result.txt").write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+
+    state = load_codes_state()
+    state[path.name] = {
+        "ran_at": f"{jalali_date(now)} {now:%H:%M:%S}",
+        "exit_code": exit_code,
+        "ok": ok,
+        "duration_s": round(duration, 1),
+    }
+    save_codes_state(state)
+
+    return ok, path.name, text
+
+
 # -------------------------------------------------- بررسی وضعیت اتصال‌ها ---
 
 def check_internet(timeout: float = 1.5) -> bool:
@@ -618,6 +770,7 @@ class AgentApp:
         self._build_ui()
         self.root.after(120, self._drain_log_queue)
         self._start_status_monitor()
+        self.start_codes_watcher()
 
         self.log(f"به Windows Agent خوش آمدید — نسخه {APP_VERSION}")
         self.log(
@@ -628,6 +781,7 @@ class AgentApp:
         self.log("دکمه اول: باز کردن lmarena در کروم و گرفتن اسکرین‌شات.")
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
         self.log("تب «آخرین تغییرات» تاریخچه نسخه‌ها را نشان می‌دهد.")
+        self.log(f"تب «کدها» پوشه {CODES_DIR} را پایش می‌کند.")
         self.log("")
 
         shots_dir, shots_ok = resolve_screenshot_dir()
@@ -809,6 +963,58 @@ class AgentApp:
         self.changes_box.insert("end", self._changelog_text())
         self.changes_box.configure(state="disabled")
 
+        # ---------- تب ۳: کدها ----------
+        tab_codes = tk.Frame(notebook, bg=bg)
+        notebook.add(tab_codes, text="  کدها  ")
+
+        codes_top = tk.Frame(tab_codes, bg=bg)
+        codes_top.pack(fill="x", padx=6, pady=(6, 0))
+
+        tk.Label(
+            codes_top,
+            text=f"پوشه کدها: {CODES_DIR}",
+            font=("Tahoma", 9),
+            bg=bg,
+            fg="#3b4763",
+            anchor="e",
+        ).pack(side="right")
+
+        self.codes_status = tk.Label(
+            codes_top,
+            text="در حال پایش…",
+            font=("Tahoma", 9, "bold"),
+            bg=bg,
+            fg="#2e9e6b",
+            anchor="w",
+        )
+        self.codes_status.pack(side="left")
+
+        self.btn_scan = tk.Button(
+            codes_top,
+            text="بررسی فوری",
+            font=("Segoe UI", 9),
+            relief="flat",
+            bg="#e8edf7",
+            cursor="hand2",
+            command=lambda: self.scan_codes(force=True),
+        )
+        self.btn_scan.pack(side="left", padx=8)
+
+        self.codes_box = scrolledtext.ScrolledText(
+            tab_codes,
+            wrap="word",
+            font=("Consolas", 10),
+            bg="#ffffff",
+            fg="#1f2a44",
+            relief="flat",
+            padx=10,
+            pady=8,
+        )
+        self.codes_box.pack(fill="both", expand=True, padx=6, pady=6)
+        self.codes_box.configure(state="disabled")
+        self.codes_box.insert("end", self._codes_summary())
+        self.codes_box.configure(state="disabled")
+
         # ------------------------- پاصفحه -------------------------
         footer = tk.Label(
             self.root,
@@ -876,6 +1082,109 @@ class AgentApp:
                 lines.append(f"   • {item}")
             lines.append("")
         return "\n".join(lines)
+
+    # --- موتور اجرای کدهای جانبی ---------------------------------------------
+
+    def _codes_summary(self) -> str:
+        state = load_codes_state()
+        lines = [
+            "اجراکننده کدهای جانبی",
+            "=" * 58,
+            f"پوشه کدها: {CODES_DIR}",
+            f"پوشه نتیجه: {OUT_DIR}",
+            "",
+        ]
+        if not state:
+            lines.append("هنوز هیچ کدی اجرا نشده است.")
+            lines.append("")
+            lines.append(
+                "هر فایلی با نام job_*.py که در پوشه کدها قرار بگیرد، "
+                "خودکار اجرا می‌شود."
+            )
+        else:
+            lines.append(f"تعداد کدهای اجراشده: {len(state)}")
+            lines.append("")
+            for name, info in sorted(state.items()):
+                mark = "✔" if info.get("ok") else "✘"
+                lines.append(
+                    f"{mark} {name} — کد خروج {info.get('exit_code')} "
+                    f"— {info.get('ran_at')} — {info.get('duration_s')} ثانیه"
+                )
+        lines.append("")
+        return "\n".join(lines)
+
+    def refresh_codes_box(self) -> None:
+        self.codes_box.configure(state="normal")
+        self.codes_box.delete("1.0", "end")
+        self.codes_box.insert("end", self._codes_summary())
+        self.codes_box.configure(state="disabled")
+
+    def start_codes_watcher(self) -> None:
+        """پوشه کدها را در ترد جدا پایش می‌کند."""
+        self._codes_pending: dict[str, tuple[int, float]] = {}
+        self._codes_lock = threading.Lock()
+        self._codes_running = True
+
+        def loop() -> None:
+            while self._codes_running:
+                try:
+                    self.scan_codes()
+                except Exception:
+                    self.log(f"خطا در پایش پوشه کدها: {traceback.format_exc(limit=1)}")
+                time.sleep(CODES_POLL_SECONDS)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def scan_codes(self, force: bool = False) -> None:
+        codes_dir = Path(CODES_DIR)
+        if not codes_dir.is_dir():
+            if force:
+                self.log(f"پوشه کدها پیدا نشد: {codes_dir}")
+            return
+
+        state = load_codes_state()
+        try:
+            candidates = sorted(codes_dir.glob("job_*.py"))
+        except OSError:
+            return
+
+        now = time.time()
+        for path in candidates:
+            name = path.name
+            if name in state:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+
+            previous = self._codes_pending.get(name)
+            if previous is None or previous[0] != size:
+                self._codes_pending[name] = (size, now)
+                if force:
+                    self.log(f"فایل تازه پیدا شد، منتظر تکمیل سینک: {name}")
+                continue
+            if not force and now - previous[1] < CODES_SETTLE_SECONDS:
+                continue
+
+            self._codes_pending.pop(name, None)
+            self.log(f"── اجرای کد دریافتی: {name} ──")
+            ok, job_name, text = run_code_job(path)
+
+            for line in text.splitlines()[-12:]:
+                self.log(f"   {line}")
+            self.log(
+                f"{'✅' if ok else '❌'} پایان {job_name} — "
+                f"نتیجه در {OUT_DIR}"
+            )
+            self.codes_status.configure(
+                text=f"آخرین اجرا: {job_name} — {'موفق' if ok else 'خطا'}",
+                fg="#2e9e6b" if ok else "#d64545",
+            )
+            self.refresh_codes_box()
+
+        if force and not candidates:
+            self.log("پوشه کدها خالی است؛ فایلی برای اجرا نیست.")
 
     # --- پایش وضعیت اتصال ----------------------------------------------------
 

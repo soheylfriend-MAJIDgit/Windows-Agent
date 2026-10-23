@@ -147,11 +147,16 @@ def run_job(path: Path) -> None:
     log(f"▶ شروع اجرا: {name}")
     OUT.mkdir(parents=True, exist_ok=True)
 
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"   # رفع خطای انکودینگ فارسی در ویندوز
+    env["PYTHONUTF8"] = "1"
+
     try:
         completed = subprocess.run(
             [sys.executable, str(target)],
             cwd=str(OUT),
             capture_output=True,
+            env=env,
             timeout=MAX_RUNTIME,
             creationflags=(
                 subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
