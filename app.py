@@ -252,10 +252,19 @@ def jalali_stamp(dt: datetime) -> str:
     return f"{jy:04d}-{jm:02d}-{jd:02d}_{dt:%H-%M-%S}"
 
 
+def short_hash(data: bytes) -> str:
+    """شناسه کوتاه محتوا (برای تشخیص نسخه، بدون نیاز به گیت)."""
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()[:8]
+
+
 def build_info() -> dict:
     """اطلاعات ساخت: اگر مخزن گیت موجود باشد از آن، وگرنه از مقادیر ثابت."""
     info = {
         "commit": BUILD_COMMIT,
+        "filehash": "",
+        "source_label": "مقدار ثابت",
         "subject": BUILD_SUBJECT,
         "date": BUILD_DATE_JALALI,
         "time": BUILD_TIME_TEHRAN,
@@ -263,6 +272,28 @@ def build_info() -> dict:
         "source": "embedded",
     }
     base = Path(__file__).resolve().parent
+    try:
+        info["filehash"] = short_hash(Path(__file__).read_bytes())
+    except OSError:
+        pass
+
+    # اگر برنامه از طریق بروزرسانی خودکار به‌روز شده باشد، هش واقعی این‌جاست
+    try:
+        import json
+
+        stamp = json.loads(STAMP_FILE.read_text(encoding="utf-8"))
+        if stamp.get("commit"):
+            info.update(
+                commit=stamp["commit"],
+                date=stamp.get("date", info["date"]),
+                time=stamp.get("time", info["time"]),
+                source="stamp",
+                source_label="بروزرسانی خودکار",
+            )
+            return info
+    except (OSError, ValueError):
+        pass
+
     if not (base / ".git").exists():
         # بدون گیت: زمان ویرایش خود فایل را نشان می‌دهیم
         try:
@@ -288,6 +319,7 @@ def build_info() -> dict:
                 date=jalali_date(moment),
                 time=f"{moment:%H:%M}",
                 source="git",
+                source_label="مخزن گیت",
             )
         status = subprocess.run(
             ["git", "-C", str(base), "status", "--porcelain"],
@@ -613,23 +645,21 @@ def save_report(report_text: str, dest_dir: Path) -> Path:
 
 
 # ------------------------------------------------ دریافت کد از گیت‌هاب ---
+#  فقط از raw.githubusercontent.com استفاده می‌کنیم تا به محدودیت نرخ
+#  API گیت‌هاب (۶۰ درخواست در ساعت) نخوریم.
 
 GITHUB_RAW = "https://raw.githubusercontent.com"
-GITHUB_API = "https://api.github.com"
+STAMP_FILE = Path(__file__).resolve().parent / "build_stamp.json"
 
 
 def _http_get(url: str, timeout: float = 8.0, etag: str | None = None):
-    """درخواست GET ساده. خروجی: (متن، وضعیت، etag تازه)"""
+    """درخواست GET متنی. خروجی: (متن، وضعیت، etag)"""
     import urllib.error
     import urllib.request
 
     request = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "Windows-Agent",
-            "Accept": "application/vnd.github+json",
-            "Cache-Control": "no-cache",
-        },
+        headers={"User-Agent": "Windows-Agent", "Cache-Control": "no-cache"},
     )
     if etag:
         request.add_header("If-None-Match", etag)
@@ -643,58 +673,45 @@ def _http_get(url: str, timeout: float = 8.0, etag: str | None = None):
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return "", 304, etag or ""
-        raise
+        user_msg = "گیت‌هاب پاسخ نداد"
+        if exc.code == 404:
+            user_msg = "فایل/مسیر در گیت‌هاب پیدا نشد"
+        elif exc.code == 403:
+            user_msg = "محدودیت نرخ گیت‌هاب"
+        raise RuntimeError(f"{user_msg} ({exc.code})") from exc
 
 
-def github_latest_sha() -> str | None:
-    """هش آخرین کامیت شاخه در گیت‌هاب."""
-    url = (
-        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
-        f"/commits/{GITHUB_BRANCH}"
+def _raw_url(branch_or_sha: str, path: str) -> str:
+    return (
+        f"{GITHUB_RAW}/{GITHUB_OWNER}/{GITHUB_REPO}/"
+        f"{branch_or_sha}/{path}"
     )
+
+
+def github_fetch_file(ref: str, path: str) -> str | None:
+    """محتوای یک فایل از ریپو (ref می‌تواند نام شاخه یا هش کامیت باشد)."""
     try:
-        text, status, _ = _http_get(url)
-        if status != 200:
-            return None
-        import json
-
-        return json.loads(text).get("sha")
-    except Exception:
-        return None
-
-
-def github_fetch_file(sha: str, path: str) -> str | None:
-    """محتوای یک فایل از ریپو در همان کامیت."""
-    url = f"{GITHUB_RAW}/{GITHUB_OWNER}/{GITHUB_REPO}/{sha}/{path}"
-    try:
-        text, status, _ = _http_get(url)
+        text, status, _ = _http_get(_raw_url(ref, path))
         return text if status == 200 else None
     except Exception:
         return None
 
 
-def github_list_jobs(sha: str) -> list[str]:
-    """فهرست فایل‌های job_*.py موجود در پوشه jobs ریپو."""
-    url = (
-        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
-        f"/contents/{GITHUB_JOBS_PATH}?ref={sha}"
-    )
-    try:
-        text, status, _ = _http_get(url)
-        if status != 200:
-            return []
-        import json
+def github_list_jobs(ref: str) -> list[str]:
+    """فهرست کدهای جانبی از فایل manifest در ریپو.
 
-        items = json.loads(text)
-        return sorted(
-            item["name"]
-            for item in items
-            if item.get("type") == "file"
-            and item["name"].startswith("job_")
-            and item["name"].endswith(".py")
-        )
-    except Exception:
+    به‌جای API، یک فایل ساده‌ی jobs/manifest.txt می‌خوانیم که در آن
+    هر خط نام یک فایل job_*.py آمده است.
+    """
+    manifest = github_fetch_file(ref, f"{GITHUB_JOBS_PATH}/manifest.txt")
+    if not manifest:
         return []
+    names = []
+    for line in manifest.splitlines():
+        name = line.strip()
+        if name and name.startswith("job_") and name.endswith(".py"):
+            names.append(name)
+    return sorted(set(names))
 
 
 # ------------------------------------------------- اجراکننده کدهای جانبی ---
@@ -946,10 +963,12 @@ class AgentApp:
             bg="#1f2a44",
         ).pack()
 
-        stamp = (
-            f"نسخه {to_fa(APP_VERSION)}  ·  کامیت {self.build['commit']}"
-            f"{' (تغییرات ذخیره‌نشده)' if self.build['dirty'] else ''}"
+        ident = (
+            self.build.get("filehash")
+            or self.build.get("commit")
+            or "?"
         )
+        stamp = f"نسخه {to_fa(APP_VERSION)}  ·  شناسه {ident}"
         tk.Label(
             header,
             text=stamp,
@@ -1191,6 +1210,7 @@ class AgentApp:
             f"{APP_TITLE} — تاریخچه تغییرات",
             "=" * 58,
             f"نسخه در حال اجرا: {APP_VERSION}",
+            f"شناسه فایل: {self.build.get('filehash') or '?'}",
             f"کامیت: {self.build['commit']} — {self.build['subject']}",
             f"تاریخ ساخت: {self.build['date']} — ساعت {self.build['time']} تهران",
             f"منبع اطلاعات ساخت: "
@@ -1225,30 +1245,33 @@ class AgentApp:
         threading.Thread(target=loop, daemon=True).start()
 
     def _github_tick(self) -> None:
-        sha = github_latest_sha()
-        if not sha:
-            self._set_lamp(self.lamp_github, "bad", "قطع")
+        """یک دور بررسی: نسخه برنامه و کدهای جانبی."""
+        try:
+            remote_app = github_fetch_file(GITHUB_BRANCH, "app.py")
+        except RuntimeError as exc:
+            self._set_lamp(self.lamp_github, "bad", str(exc)[:28])
             return
-        self._set_lamp(self.lamp_github, "ok", f"{sha[:7]}")
-
-        first_run = self._gh_sha is None
-        self._gh_sha = sha
-
-        # ۱) بروزرسانی خود برنامه
-        if not first_run:
-            self._maybe_self_update(sha)
-
-        # ۲) کدهای جانبی
-        self._pull_jobs(sha)
-
-    def _maybe_self_update(self, sha: str) -> None:
-        current = self.build.get("commit", "")
-        if current and sha.startswith(current):
+        if not remote_app:
+            self._set_lamp(self.lamp_github, "bad", "فایل پیدا نشد")
             return
-        remote = github_fetch_file(sha, "app.py")
-        if not remote:
-            return
-        # فقط اگر سالم باشد اعمال کن
+
+        # شناسه نسخه = هش کوتاه محتوای فایل (بدون وابستگی به گیت)
+        remote_tag = short_hash(remote_app.encode("utf-8"))
+        self._set_lamp(self.lamp_github, "ok", remote_tag)
+
+        if self._should_update(remote_app):
+            self._apply_update(remote_app, remote_tag)
+        else:
+            self._pull_jobs()
+
+    def _should_update(self, remote_app: str) -> bool:
+        try:
+            local_bytes = Path(__file__).read_bytes()
+        except OSError:
+            return False
+        if remote_app.encode("utf-8") == local_bytes:
+            return False
+        # فقط اگر سالم باشد
         import py_compile
         import tempfile
 
@@ -1256,41 +1279,63 @@ class AgentApp:
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".py", delete=False, encoding="utf-8"
             ) as fh:
-                fh.write(remote)
+                fh.write(remote_app)
                 temp_path = fh.name
             py_compile.compile(temp_path, doraise=True)
+            Path(temp_path).unlink(missing_ok=True)
+            return True
         except Exception as exc:
-            self.log(f"⚠️ نسخه جدید گیت‌هاب سالم نیست، اعمال نشد: {exc}")
-            return
+            self.log(f"⚠️ نسخه گیت‌هاب سالم نیست، اعمال نشد: {exc}")
+            return False
 
+    def _apply_update(self, remote_app: str, remote_tag: str) -> None:
         here = Path(__file__).resolve()
-        backup = here.with_suffix(f".backup-{datetime.now():%H%M%S}.py")
+        stamp = datetime.now()
+        backup = here.with_name(
+            f"app.backup-{stamp:%Y%m%d-%H%M%S}.py"
+        )
         try:
             backup.write_bytes(here.read_bytes())
-            here.write_text(remote, encoding="utf-8")
+            here.write_text(remote_app, encoding="utf-8")
+            import json
+
+            STAMP_FILE.write_text(
+                json.dumps(
+                    {
+                        "commit": remote_tag,
+                        "date": jalali_date(tehran_now()),
+                        "time": f"{tehran_now():%H:%M}",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         except OSError as exc:
             self.log(f"⚠️ نوشتن نسخه جدید ممکن نشد: {exc}")
             return
 
-        self.log(f"🔄 نسخه جدید از گیت‌هاب دریافت شد: {sha[:7]}")
-        self.log(f"   پشتیبان: {backup.name}")
+        self.log("🔄 نسخه جدید از گیت‌هاب دریافت شد")
+        self.log(f"   هش: {remote_tag}  |  پشتیبان: {backup.name}")
+        self._pull_jobs()
+
         if AUTO_RESTART_ON_UPDATE:
-            self.log("   برنامه در ۳ ثانیه دوباره راه‌اندازی می‌شود…")
-            time.sleep(3)
+            self.log("   برنامه در ۲ ثانیه دوباره راه‌اندازی می‌شود…")
+            time.sleep(2)
             try:
                 subprocess.Popen([sys.executable, str(here)])
             except OSError:
                 pass
             os._exit(0)
 
-    def _pull_jobs(self, sha: str) -> None:
+    def _pull_jobs(self) -> None:
         codes_dir = Path(CODES_DIR)
         try:
             codes_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             return
 
-        for name in github_list_jobs(sha):
+        for name in github_list_jobs(GITHUB_BRANCH):
             if name in self._gh_seen_jobs:
                 continue
             state = load_codes_state()
@@ -1298,7 +1343,7 @@ class AgentApp:
                 self._gh_seen_jobs.add(name)
                 continue
 
-            content = github_fetch_file(sha, f"{GITHUB_JOBS_PATH}/{name}")
+            content = github_fetch_file(GITHUB_BRANCH, f"{GITHUB_JOBS_PATH}/{name}")
             if not content:
                 continue
             try:

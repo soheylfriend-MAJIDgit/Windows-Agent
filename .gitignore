@@ -6,3 +6,6 @@ open_apps_report_*.txt
 
 # فایل‌های دانلودشده از گوگل درایو (موقت)
 google_drive/
+__pycache__/
+app.backup-*.py
+build_stamp.json
