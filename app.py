@@ -1367,19 +1367,24 @@ class AgentApp:
                     pass
 
         written = 0
+        unchanged = 0
         for name, content in files.items():
+            target = codes_dir / name
             try:
-                (codes_dir / name).write_bytes(content)
+                if target.exists() and target.read_bytes() == content:
+                    unchanged += 1
+                    continue
+                target.write_bytes(content)
                 written += 1
             except OSError as exc:
                 self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
 
-        changed = removed > 0
-        self.log(
-            f"📁 پوشه codes: {written} فایل"
-            + (f"، {removed} حذف‌شده" if removed else "")
-        )
-        return changed or written > 0
+        if written or removed:
+            self.log(
+                f"📁 پوشه codes به‌روز شد: {written} فایل جدید/تغییریافته"
+                + (f"، {removed} حذف‌شده" if removed else "")
+            )
+        return written > 0 or removed > 0
 
     def run_pending_codes(self) -> None:
         """کدهایی که تازه آمده‌اند یا تغییر کرده‌اند را اجرا می‌کند."""
