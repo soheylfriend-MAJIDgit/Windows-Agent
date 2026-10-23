@@ -34,7 +34,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.8"
+APP_VERSION = "0.9"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -55,6 +55,16 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "0.9",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "ساختار ساده شد: گوگل درایو فقط ScreenShots و logs",
+            "پوشه codes محلی است و از گیت‌هاب جایگزین می‌شود",
+            "با هر کامیت (تغییر version.txt) بسته کد از گیت‌هاب گرفته می‌شود",
+            "نتیجه هر کد در logs گوگل درایو ذخیره می‌شود تا Arena بخواند",
+        ],
+    ),
     (
         "0.8",
         "۱۴۰۵/۰۸/۰۲",
@@ -140,61 +150,42 @@ PAGE_LOAD_SECONDS = 5
 SCREENSHOT_PREFIX = "google"
 
 # ------------------------------------------------------------------
-#  مسیرهای ذخیره (همه داخل گوگل درایو)
+#  مسیرهای ذخیره
+#  گوگل درایو فقط دو چیز دارد: ScreenShots و logs
 # ------------------------------------------------------------------
-# پوشه اصلی پروژه روی گوگل درایو (Drive for Desktop)
 DRIVE_BASE_DIR = r"C:\Users\alibatel\My Drive\Windows-Agent-DB"
 
 # اسکرین‌شات‌ها  →  ...\Windows-Agent-DB\ScreenShots
 SCREENSHOT_DIR = DRIVE_BASE_DIR + r"\ScreenShots"
 
-# گزارش‌های txt  →  ...\Windows-Agent-DB\logs
+# گزارش‌ها و نتیجه کدها  →  ...\Windows-Agent-DB\logs
 REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
 
-# کدهایی که Arena می‌فرستد  →  ...\Windows-Agent-DB\Codes
-CODES_DIR = DRIVE_BASE_DIR + r"\Codes"
+# خود برنامه و پوشه codes محلی هستند (کنار app.py)
+LOCAL_BASE_DIR = Path(__file__).resolve().parent
+CODES_DIR = str(LOCAL_BASE_DIR / "codes")
+CODES_STATE_FILE = str(LOCAL_BASE_DIR / "codes_state.json")
 
 # ------------------------------------------------------------------
-#  پایش پوشه گوگل درایو از طریق لینک عمومی (بدون نیاز به سینک محلی)
-#  لینک: https://drive.google.com/drive/folders/<FOLDER_ID>?usp=sharing
-#  پوشه باید با «هر کسی که لینک را دارد» به اشتراک گذاشته شده باشد.
-# ------------------------------------------------------------------
-DRIVE_PUBLIC_FOLDER_ID = "1N5NXtezeMyogLDceudnTysDPc1yjk9vZ"
-
-# هر چند ثانیه پوشه ابری بررسی شود (سرور گوگل، بدون تأخیر سینک)
-PUBLIC_FOLDER_POLL_SECONDS = 10
-
-# پیشوند فایل‌هایی که از پوشه ابری اجرا می‌شوند
-PUBLIC_JOB_PREFIX = "job_"
-
-# نتیجه اجرای کدها  →  ...\Windows-Agent-DB\out
-OUT_DIR = DRIVE_BASE_DIR + r"\out"
-
-# پوشه کدهای اجراشده (تا دوباره اجرا نشوند)
-CODES_DONE_DIR = CODES_DIR + r"\done"
-
-# حافظه اجراکننده (کدام فایل‌ها قبلاً اجرا شده‌اند)
-CODES_STATE_FILE = DRIVE_BASE_DIR + r"\codes_state.json"
-
-# ------------------------------------------------------------------
-#  دریافت کد از گیت‌هاب (سریع، چند ثانیه‌ای) به‌جای سینک گوگل درایو
+#  دریافت کد از گیت‌هاب
+#  هر بار version.txt در ریپو عوض شود:
+#    ۱) zip ریپو گرفته می‌شود
+#    ۲) محتویات پوشه codes جایگزین می‌شود
+#    ۳) app.py در صورت تغییر بروز و برنامه ری‌استارت می‌شود
 # ------------------------------------------------------------------
 GITHUB_OWNER = "soheylfriend-MAJIDgit"
 GITHUB_REPO = "Windows-Agent"
 GITHUB_BRANCH = "arena/025c788f-windows-agent"
+GITHUB_CODES_PATH = "codes"
+GITHUB_VERSION_FILE = "version.txt"
 
-# هر چند ثانیه گیت‌هاب بررسی شود
-GITHUB_POLL_SECONDS = 20
+# هر چند ثانیه نسخه گیت‌هاب بررسی شود
+SYNC_POLL_SECONDS = 10
 
-# پوشه‌ای در ریپو که کدهای جانبی از آن گرفته می‌شوند
-GITHUB_JOBS_PATH = "jobs"
-
-# آیا بعد از دریافت نسخه جدید، برنامه خودش را دوباره راه‌اندازی کند؟
+# آیا بعد از بروزرسانی، برنامه خودش را دوباره راه‌اندازی کند؟
 AUTO_RESTART_ON_UPDATE = True
 
-# فاصله بررسی پوشه کدها و محدودیت زمان اجرا
-CODES_POLL_SECONDS = 3
-CODES_SETTLE_SECONDS = 4
+# حداکثر زمان اجرای هر کد جانبی (ثانیه)
 CODES_MAX_RUNTIME = 600
 
 # اگر گوگل درایو در دسترس نباشد، این‌ها کجا ذخیره شوند؟
@@ -666,171 +657,101 @@ def save_report(report_text: str, dest_dir: Path) -> Path:
     return target
 
 
-# -------------------------------------- پوشه عمومی گوگل درایو (بدون سینک) ---
-#  فهرست فایل‌ها از نمای عمومی پوشه خوانده می‌شود:
-#    https://drive.google.com/embeddedfolderview?id=<ID>#list
-#  این صفحه HTML ساده است و به هیچ کلید API یا ورود نیاز ندارد؛
-#  فقط پوشه باید «هر کسی که لینک را دارد» باشد.
-
-DRIVE_VIEW_URL = "https://drive.google.com/embeddedfolderview?id={folder}#list"
-DRIVE_DOWNLOAD_URL = "https://drive.google.com/uc?export=download&id={file_id}"
-
-
-def _http_get_bytes(url: str, timeout: float = 15.0) -> tuple[bytes, int]:
-    import urllib.error
-    import urllib.request
-
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read(), response.status
-    except urllib.error.HTTPError as exc:
-        return b"", exc.code
-    except Exception:
-        return b"", 0
-
-
-def parse_folder_html(html: str) -> list[dict]:
-    """فایل‌های یک صفحه embeddedfolderview را استخراج می‌کند."""
-    import re
-
-    items: list[dict] = []
-    # هر آیتم در بلوکی با id="entry-<FILE_ID>" قرار دارد
-    for block in re.split(r'<div class="flip-entry"', html)[1:]:
-        id_match = re.search(r'id="entry-([A-Za-z0-9_-]{10,})"', block)
-        title_match = re.search(
-            r'class="flip-entry-title">([^<]+)<', block
-        )
-        if not id_match or not title_match:
-            continue
-        items.append(
-            {
-                "id": id_match.group(1),
-                "name": title_match.group(1).strip(),
-            }
-        )
-    return items
-
-
-def drive_public_list(folder_id: str) -> tuple[list[dict], str]:
-    """فهرست فایل‌های پوشه عمومی. خروجی: (فایل‌ها، پیام خطا یا رشته خالی)"""
-    data, status = _http_get_bytes(DRIVE_VIEW_URL.format(folder=folder_id))
-    if status != 200 or not data:
-        return [], f"عدم دسترسی به پوشه ({status or 'شبکه'})"
-    html = data.decode("utf-8", errors="replace")
-    items = parse_folder_html(html)
-    if not items and "flip-entry" not in html and "entry-" not in html:
-        return [], "پوشه خالی است یا دسترسی عمومی ندارد"
-    return items, ""
-
-
-def drive_download_file(file_id: str) -> bytes | None:
-    data, status = _http_get_bytes(DRIVE_DOWNLOAD_URL.format(file_id=file_id))
-    if status == 200 and data and b"<html" not in data[:200].lower():
-        return data
-    return None
-
-
 # ------------------------------------------------ دریافت کد از گیت‌هاب ---
-#  فقط از raw.githubusercontent.com استفاده می‌کنیم تا به محدودیت نرخ
-#  API گیت‌هاب (۶۰ درخواست در ساعت) نخوریم.
+#  همه چیز از یک مسیر: zip کل ریپو از codeload.github.com
+#  (بدون کلید API، بدون محدودیت نرخ)
 
 GITHUB_RAW = "https://raw.githubusercontent.com"
-STAMP_FILE = Path(__file__).resolve().parent / "build_stamp.json"
+GITHUB_ZIP = "https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}"
 
 
-def _http_get(url: str, timeout: float = 8.0, etag: str | None = None):
-    """درخواست GET متنی. خروجی: (متن، وضعیت، etag)"""
+def _http_get_bytes(url: str, timeout: float = 20.0) -> bytes | None:
     import urllib.error
     import urllib.request
 
     request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Windows-Agent", "Cache-Control": "no-cache"},
+        url, headers={"User-Agent": "Windows-Agent", "Cache-Control": "no-cache"}
     )
-    if etag:
-        request.add_header("If-None-Match", etag)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return (
-                response.read().decode("utf-8", errors="replace"),
-                response.status,
-                response.headers.get("ETag", ""),
-            )
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304:
-            return "", 304, etag or ""
-        user_msg = "گیت‌هاب پاسخ نداد"
-        if exc.code == 404:
-            user_msg = "فایل/مسیر در گیت‌هاب پیدا نشد"
-        elif exc.code == 403:
-            user_msg = "محدودیت نرخ گیت‌هاب"
-        raise RuntimeError(f"{user_msg} ({exc.code})") from exc
-
-
-def _raw_url(branch_or_sha: str, path: str) -> str:
-    return (
-        f"{GITHUB_RAW}/{GITHUB_OWNER}/{GITHUB_REPO}/"
-        f"{branch_or_sha}/{path}"
-    )
-
-
-def github_fetch_file(ref: str, path: str) -> str | None:
-    """محتوای یک فایل از ریپو (ref می‌تواند نام شاخه یا هش کامیت باشد)."""
-    try:
-        text, status, _ = _http_get(_raw_url(ref, path))
-        return text if status == 200 else None
-    except Exception:
+            if response.status != 200:
+                return None
+            return response.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         return None
 
 
-def github_list_jobs(ref: str) -> list[str]:
-    """فهرست کدهای جانبی از فایل manifest در ریپو.
+def repo_version() -> str | None:
+    """محتوای version.txt در ریپو (کوچک و سریع، برای تشخیص تغییر)."""
+    url = f"{GITHUB_RAW}/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_VERSION_FILE}"
+    data = _http_get_bytes(url, timeout=10)
+    if not data:
+        return None
+    return data.decode("utf-8", errors="replace").strip()
 
-    به‌جای API، یک فایل ساده‌ی jobs/manifest.txt می‌خوانیم که در آن
-    هر خط نام یک فایل job_*.py آمده است.
-    """
-    manifest = github_fetch_file(ref, f"{GITHUB_JOBS_PATH}/manifest.txt")
-    if not manifest:
-        return []
-    names = []
-    for line in manifest.splitlines():
-        name = line.strip()
-        if name and name.startswith("job_") and name.endswith(".py"):
-            names.append(name)
-    return sorted(set(names))
+
+def repo_zip() -> bytes | None:
+    """zip کل ریپو."""
+    url = GITHUB_ZIP.format(
+        owner=GITHUB_OWNER, repo=GITHUB_REPO, branch=GITHUB_BRANCH
+    )
+    return _http_get_bytes(url, timeout=40)
+
+
+def extract_folder(zip_bytes: bytes, folder: str) -> dict[str, bytes]:
+    """محتویات یک پوشه از zip را بیرون می‌کشد: {نام فایل: محتوا}"""
+    import io
+    import zipfile
+
+    result: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for name in zf.namelist():
+                if name.endswith("/"):
+                    continue
+                parts = name.split("/", 1)
+                if len(parts) != 2:
+                    continue
+                inner = parts[1]
+                prefix = folder.rstrip("/") + "/"
+                if inner.startswith(prefix) and "/" not in inner[len(prefix):]:
+                    result[inner[len(prefix):]] = zf.read(name)
+    except (zipfile.BadZipFile, OSError):
+        return {}
+    return result
+
+
+def extract_file(zip_bytes: bytes, path: str) -> bytes | None:
+    import io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for name in zf.namelist():
+                parts = name.split("/", 1)
+                if len(parts) == 2 and parts[1] == path:
+                    return zf.read(name)
+    except (zipfile.BadZipFile, OSError):
+        return None
+    return None
 
 
 # ------------------------------------------------- اجراکننده کدهای جانبی ---
 
-def _codes_paths() -> tuple[Path, Path, Path, Path]:
-    base = Path(DRIVE_BASE_DIR)
-    return (
-        Path(CODES_DIR),
-        Path(CODES_DONE_DIR),
-        Path(OUT_DIR),
-        Path(CODES_STATE_FILE),
-    )
-
-
 def load_codes_state() -> dict:
-    _, _, _, state_file = _codes_paths()
     try:
         import json
 
-        return json.loads(state_file.read_text(encoding="utf-8"))
+        return json.loads(Path(CODES_STATE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
 def save_codes_state(state: dict) -> None:
-    _, _, _, state_file = _codes_paths()
     try:
         import json
 
-        state_file.write_text(
+        Path(CODES_STATE_FILE).write_text(
             json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except OSError:
@@ -838,33 +759,18 @@ def save_codes_state(state: dict) -> None:
 
 
 def run_code_job(path: Path) -> tuple[bool, str, str]:
-    """یک فایل job_*.py را اجرا می‌کند.
+    """یک فایل job_*.py را اجرا و نتیجه را در logs گوگل درایو ذخیره می‌کند.
 
-    خروجی: (موفق بود؟، عنوان، متن نتیجه)
+    خروجی: (موفق بود؟، نام فایل، متن نتیجه)
     """
-    codes_dir, done_dir, out_dir, _ = _codes_paths()
     started = time.time()
-
+    dest_dir, _ = resolve_report_dir()
     try:
-        done_dir.mkdir(parents=True, exist_ok=True)
-        out_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return False, path.name, f"ساخت پوشه ممکن نشد: {exc}"
-
-    target = done_dir / path.name
-    if target.exists():
-        target = done_dir / f"{path.stem}__{int(time.time())}.py"
-    try:
-        path.replace(target)
+        dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        try:
-            target.write_bytes(path.read_bytes())
-            path.unlink()
-        except OSError as exc:
-            return False, path.name, f"انتقال فایل ممکن نشد: {exc}"
+        dest_dir = Path(CODES_DIR)
 
     env = dict(os.environ)
-    # رفع خطای انکودینگ فارسی در ویندوز (cp1252)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
 
@@ -872,8 +778,8 @@ def run_code_job(path: Path) -> tuple[bool, str, str]:
     stdout_text = stderr_text = ""
     try:
         completed = subprocess.run(
-            [sys.executable, str(target)],
-            cwd=str(out_dir),
+            [sys.executable, str(path)],
+            cwd=str(path.parent),
             capture_output=True,
             timeout=CODES_MAX_RUNTIME,
             env=env,
@@ -911,13 +817,13 @@ def run_code_job(path: Path) -> tuple[bool, str, str]:
     )
 
     try:
-        (out_dir / f"{target.stem}_result.txt").write_text(text, encoding="utf-8")
-        (out_dir / "last_result.txt").write_text(text, encoding="utf-8")
+        (dest_dir / f"{path.stem}_result.txt").write_text(text, encoding="utf-8")
     except OSError:
         pass
 
     state = load_codes_state()
     state[path.name] = {
+        "hash": short_hash(path.read_bytes()) if path.exists() else "",
         "ran_at": f"{jalali_date(now)} {now:%H:%M:%S}",
         "exit_code": exit_code,
         "ok": ok,
@@ -995,9 +901,7 @@ class AgentApp:
         self._build_ui()
         self.root.after(120, self._drain_log_queue)
         self._start_status_monitor()
-        self.start_codes_watcher()
-        self.start_github_sync()
-        self.start_public_folder_watcher()
+        self.start_sync()
 
         self.log(f"به Windows Agent خوش آمدید — نسخه {APP_VERSION}")
         self.log(
@@ -1008,8 +912,8 @@ class AgentApp:
         self.log(f"دکمه اول: باز کردن {LMARENA_URL} در کروم و گرفتن اسکرین‌شات.")
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
         self.log("تب «آخرین تغییرات» تاریخچه نسخه‌ها را نشان می‌دهد.")
-        self.log(f"تب «کدها» پوشه {CODES_DIR} را پایش می‌کند.")
-        self.log(f"دریافت فوری کد از گیت‌هاب: {GITHUB_OWNER}/{GITHUB_REPO} @ {GITHUB_BRANCH}")
+        self.log(f"همگام‌سازی کد: {GITHUB_OWNER}/{GITHUB_REPO} @ {GITHUB_BRANCH}")
+        self.log(f"پوشه کدها (محلی): {CODES_DIR}")
         self.log("")
 
         shots_dir, shots_ok = resolve_screenshot_dir()
@@ -1090,7 +994,6 @@ class AgentApp:
         self.lamp_internet = self._make_lamp(lamps_bar, "اینترنت")
         self.lamp_drive = self._make_lamp(lamps_bar, "گوگل درایو")
         self.lamp_github = self._make_lamp(lamps_bar, "گیت‌هاب")
-        self.lamp_folder = self._make_lamp(lamps_bar, "پوشه درایو")
 
         tk.Label(
             lamps_bar,
@@ -1228,7 +1131,7 @@ class AgentApp:
             relief="flat",
             bg="#e8edf7",
             cursor="hand2",
-            command=lambda: self.scan_codes(force=True),
+            command=lambda: self.sync_once(force=True),
         )
         self.btn_scan.pack(side="left", padx=8)
 
@@ -1316,53 +1219,57 @@ class AgentApp:
             lines.append("")
         return "\n".join(lines)
 
-    # --- دریافت فوری کد از گیت‌هاب --------------------------------------------
+    # --- همگام‌سازی با گیت‌هاب --------------------------------------------------
 
-    def start_github_sync(self) -> None:
-        """هر چند ثانیه گیت‌هاب را نگاه می‌کند: بروزرسانی برنامه + کدهای جانبی."""
-        self._gh_sha: str | None = None
-        self._gh_seen_jobs: set[str] = set()
-        self._gh_enabled = True
+    def start_sync(self) -> None:
+        """هر چند ثانیه version.txt ریپو را می‌خواند؛ اگر عوض شد، کد را می‌گیرد."""
+        self._last_version: str | None = None
+        self._sync_running = True
 
         def loop() -> None:
-            time.sleep(3)
-            while self._gh_enabled:
+            time.sleep(2)
+            while self._sync_running:
                 try:
-                    self._github_tick()
+                    self.sync_once()
                 except Exception:
                     pass
-                time.sleep(GITHUB_POLL_SECONDS)
+                time.sleep(SYNC_POLL_SECONDS)
 
         threading.Thread(target=loop, daemon=True).start()
 
-    def _github_tick(self) -> None:
-        """یک دور بررسی: نسخه برنامه و کدهای جانبی."""
-        try:
-            remote_app = github_fetch_file(GITHUB_BRANCH, "app.py")
-        except RuntimeError as exc:
-            self._set_lamp(self.lamp_github, "bad", str(exc)[:28])
-            return
-        if not remote_app:
-            self._set_lamp(self.lamp_github, "bad", "فایل پیدا نشد")
+    def sync_once(self, force: bool = False) -> None:
+        version = repo_version()
+        if version is None:
+            self._set_lamp(self.lamp_github, "bad", "قطع")
             return
 
-        # شناسه نسخه = هش کوتاه محتوای فایل (بدون وابستگی به گیت)
-        remote_tag = short_hash(remote_app.encode("utf-8"))
-        self._set_lamp(self.lamp_github, "ok", remote_tag)
+        self._set_lamp(self.lamp_github, "ok", version[:7])
 
-        if self._should_update(remote_app):
-            self._apply_update(remote_app, remote_tag)
-        else:
-            self._pull_jobs()
+        if not force and version == self._last_version:
+            return
+        self._last_version = version
 
-    def _should_update(self, remote_app: str) -> bool:
+        self.log(f"⬇️ نسخه {version} در گیت‌هاب — دریافت بسته کد…")
+        data = repo_zip()
+        if not data:
+            self.log("⚠️ دریافت بسته از گیت‌هاب ممکن نشد")
+            return
+
+        self._update_app_if_needed(data, version)
+        self._replace_codes(data)
+        self.run_pending_codes()
+
+    def _update_app_if_needed(self, data: bytes, version: str) -> None:
+        remote = extract_file(data, "app.py")
+        if not remote:
+            return
+        here = Path(__file__).resolve()
         try:
-            local_bytes = Path(__file__).read_bytes()
+            if remote == here.read_bytes():
+                return
         except OSError:
-            return False
-        if remote_app.encode("utf-8") == local_bytes:
-            return False
-        # فقط اگر سالم باشد
+            return
+
         import py_compile
         import tempfile
 
@@ -1370,48 +1277,25 @@ class AgentApp:
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".py", delete=False, encoding="utf-8"
             ) as fh:
-                fh.write(remote_app)
+                fh.write(remote.decode("utf-8", errors="replace"))
                 temp_path = fh.name
             py_compile.compile(temp_path, doraise=True)
             Path(temp_path).unlink(missing_ok=True)
-            return True
         except Exception as exc:
-            self.log(f"⚠️ نسخه گیت‌هاب سالم نیست، اعمال نشد: {exc}")
-            return False
+            self.log(f"⚠️ نسخه جدید سالم نیست، اعمال نشد: {exc}")
+            return
 
-    def _apply_update(self, remote_app: str, remote_tag: str) -> None:
-        here = Path(__file__).resolve()
-        stamp = datetime.now()
-        backup = here.with_name(
-            f"app.backup-{stamp:%Y%m%d-%H%M%S}.py"
-        )
+        backup = here.with_name(f"app.backup-{datetime.now():%Y%m%d-%H%M%S}.py")
         try:
             backup.write_bytes(here.read_bytes())
-            here.write_text(remote_app, encoding="utf-8")
-            import json
-
-            STAMP_FILE.write_text(
-                json.dumps(
-                    {
-                        "commit": remote_tag,
-                        "date": jalali_date(tehran_now()),
-                        "time": f"{tehran_now():%H:%M}",
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
+            here.write_bytes(remote)
         except OSError as exc:
             self.log(f"⚠️ نوشتن نسخه جدید ممکن نشد: {exc}")
             return
 
-        self.log("🔄 نسخه جدید از گیت‌هاب دریافت شد")
-        self.log(f"   هش: {remote_tag}  |  پشتیبان: {backup.name}")
-        self._pull_jobs()
-
+        self.log(f"🔄 برنامه بروز شد (نسخه {version}) — پشتیبان: {backup.name}")
         if AUTO_RESTART_ON_UPDATE:
-            self.log("   برنامه در ۲ ثانیه دوباره راه‌اندازی می‌شود…")
+            self.log("   راه‌اندازی مجدد در ۲ ثانیه…")
             time.sleep(2)
             try:
                 subprocess.Popen([sys.executable, str(here)])
@@ -1419,93 +1303,57 @@ class AgentApp:
                 pass
             os._exit(0)
 
-    def _pull_jobs(self) -> None:
+    def _replace_codes(self, data: bytes) -> None:
+        """محتویات پوشه codes ریپو جایگزین پوشه codes محلی می‌شود."""
+        files = extract_folder(data, GITHUB_CODES_PATH)
         codes_dir = Path(CODES_DIR)
         try:
             codes_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
+        except OSError as exc:
+            self.log(f"⚠️ ساخت پوشه codes ممکن نشد: {exc}")
             return
 
-        for name in github_list_jobs(GITHUB_BRANCH):
-            if name in self._gh_seen_jobs:
-                continue
-            state = load_codes_state()
-            if name in state:
-                self._gh_seen_jobs.add(name)
-                continue
-
-            content = github_fetch_file(GITHUB_BRANCH, f"{GITHUB_JOBS_PATH}/{name}")
-            if not content:
-                continue
-            try:
-                (codes_dir / name).write_text(content, encoding="utf-8")
-                self._gh_seen_jobs.add(name)
-                self.log(f"📥 کد تازه از گیت‌هاب: {name}")
-            except OSError as exc:
-                self.log(f"⚠️ ذخیره کد ممکن نشد: {exc}")
-
-    # --- پایش پوشه عمومی گوگل درایو ------------------------------------------
-
-    def start_public_folder_watcher(self) -> None:
-        """هر چند ثانیه فهرست پوشه ابری را از سرور گوگل می‌خواند."""
-        self._public_seen: set[str] = set()
-        self._public_running = True
-        self._public_status_text = "در انتظار اولین بررسی…"
-
-        def loop() -> None:
-            time.sleep(2)
-            while self._public_running:
+        removed = 0
+        for existing in codes_dir.glob("*.py"):
+            if existing.name not in files:
                 try:
-                    self.scan_public_folder()
-                except Exception as exc:
-                    self._public_status_text = f"خطا: {exc}"
-                time.sleep(PUBLIC_FOLDER_POLL_SECONDS)
+                    existing.unlink()
+                    removed += 1
+                except OSError:
+                    pass
 
-        threading.Thread(target=loop, daemon=True).start()
-
-    def scan_public_folder(self) -> None:
-        folder_id = DRIVE_PUBLIC_FOLDER_ID
-        if not folder_id:
-            return
-
-        items, error = drive_public_list(folder_id)
-        if error:
-            self._public_status_text = f"پوشه: {error}"
-            self._set_lamp(self.lamp_folder, "bad", "خطا")
-            return
-
-        jobs = [
-            item
-            for item in items
-            if item["name"].startswith(PUBLIC_JOB_PREFIX)
-            and item["name"].endswith(".py")
-        ]
-        self._public_status_text = (
-            f"پوشه: {len(items)} فایل — {len(jobs)} کد قابل اجرا"
-        )
-        self._set_lamp(self.lamp_folder, "ok", f"{len(items)} فایل")
-
-        state = load_codes_state()
-        codes_dir = Path(CODES_DIR)
-
-        for item in jobs:
-            name = item["name"]
-            if name in self._public_seen or name in state:
-                self._public_seen.add(name)
-                continue
-
-            content = drive_download_file(item["id"])
-            if content is None:
-                self.log(f"⚠️ دانلود {name} از پوشه ابری ممکن نشد")
-                continue
-
+        written = 0
+        for name, content in files.items():
             try:
-                codes_dir.mkdir(parents=True, exist_ok=True)
                 (codes_dir / name).write_bytes(content)
-                self._public_seen.add(name)
-                self.log(f"📥 کد تازه از پوشه گوگل درایو: {name}")
+                written += 1
             except OSError as exc:
-                self.log(f"⚠️ ذخیره کد ممکن نشد: {exc}")
+                self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
+
+        self.log(f"📁 پوشه codes جایگزین شد: {written} فایل" + (f"، {removed} حذف" if removed else ""))
+
+    def run_pending_codes(self) -> None:
+        """کدهایی که تازه آمده‌اند یا تغییر کرده‌اند را اجرا می‌کند."""
+        codes_dir = Path(CODES_DIR)
+        state = load_codes_state()
+        for path in sorted(codes_dir.glob("job_*.py")):
+            try:
+                current = short_hash(path.read_bytes())
+            except OSError:
+                continue
+            if state.get(path.name, {}).get("hash") == current:
+                continue
+
+            self.log(f"▶️ اجرای {path.name}")
+            ok, name, text = run_code_job(path)
+            for line in text.splitlines()[-10:]:
+                self.log(f"   {line}")
+            self.log(f"{'✅' if ok else '❌'} پایان {name}")
+            self.codes_status.configure(
+                text=f"آخرین اجرا: {name} — {'موفق' if ok else 'خطا'}",
+                fg="#2e9e6b" if ok else "#d64545",
+            )
+        self.refresh_codes_box()
 
     # --- موتور اجرای کدهای جانبی ---------------------------------------------
 
@@ -1514,10 +1362,10 @@ class AgentApp:
         lines = [
             "اجراکننده کدهای جانبی",
             "=" * 58,
-            f"پوشه ابری (لینک عمومی): {DRIVE_PUBLIC_FOLDER_ID}",
-            f"وضعیت: {getattr(self, '_public_status_text', '—')}",
+            f"منبع کد: github.com/{GITHUB_OWNER}/{GITHUB_REPO} ({GITHUB_BRANCH})",
+            f"آخرین نسخه دریافتی: {self._last_version or '—'}",
             f"پوشه کدها: {CODES_DIR}",
-            f"پوشه نتیجه: {OUT_DIR}",
+            f"پوشه نتیجه: {REPORT_DIR}",
             "",
         ]
         if not state:
@@ -1544,73 +1392,6 @@ class AgentApp:
         self.codes_box.delete("1.0", "end")
         self.codes_box.insert("end", self._codes_summary())
         self.codes_box.configure(state="disabled")
-
-    def start_codes_watcher(self) -> None:
-        """پوشه کدها را در ترد جدا پایش می‌کند."""
-        self._codes_pending: dict[str, tuple[int, float]] = {}
-        self._codes_lock = threading.Lock()
-        self._codes_running = True
-
-        def loop() -> None:
-            while self._codes_running:
-                try:
-                    self.scan_codes()
-                except Exception:
-                    self.log(f"خطا در پایش پوشه کدها: {traceback.format_exc(limit=1)}")
-                time.sleep(CODES_POLL_SECONDS)
-
-        threading.Thread(target=loop, daemon=True).start()
-
-    def scan_codes(self, force: bool = False) -> None:
-        codes_dir = Path(CODES_DIR)
-        if not codes_dir.is_dir():
-            if force:
-                self.log(f"پوشه کدها پیدا نشد: {codes_dir}")
-            return
-
-        state = load_codes_state()
-        try:
-            candidates = sorted(codes_dir.glob("job_*.py"))
-        except OSError:
-            return
-
-        now = time.time()
-        for path in candidates:
-            name = path.name
-            if name in state:
-                continue
-            try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-
-            previous = self._codes_pending.get(name)
-            if previous is None or previous[0] != size:
-                self._codes_pending[name] = (size, now)
-                if force:
-                    self.log(f"فایل تازه پیدا شد، منتظر تکمیل سینک: {name}")
-                continue
-            if not force and now - previous[1] < CODES_SETTLE_SECONDS:
-                continue
-
-            self._codes_pending.pop(name, None)
-            self.log(f"── اجرای کد دریافتی: {name} ──")
-            ok, job_name, text = run_code_job(path)
-
-            for line in text.splitlines()[-12:]:
-                self.log(f"   {line}")
-            self.log(
-                f"{'✅' if ok else '❌'} پایان {job_name} — "
-                f"نتیجه در {OUT_DIR}"
-            )
-            self.codes_status.configure(
-                text=f"آخرین اجرا: {job_name} — {'موفق' if ok else 'خطا'}",
-                fg="#2e9e6b" if ok else "#d64545",
-            )
-            self.refresh_codes_box()
-
-        if force and not candidates:
-            self.log("پوشه کدها خالی است؛ فایلی برای اجرا نیست.")
 
     # --- پایش وضعیت اتصال ----------------------------------------------------
 
