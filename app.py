@@ -163,6 +163,7 @@ REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
 
 # خود برنامه و پوشه codes محلی هستند (کنار app.py)
 LOCAL_BASE_DIR = Path(__file__).resolve().parent
+STAMP_FILE = LOCAL_BASE_DIR / "build_stamp.json"
 CODES_DIR = str(LOCAL_BASE_DIR / "codes")
 CODES_STATE_FILE = str(LOCAL_BASE_DIR / "codes_state.json")
 
@@ -295,9 +296,9 @@ def build_info() -> dict:
         import json
 
         stamp = json.loads(STAMP_FILE.read_text(encoding="utf-8"))
-        if stamp.get("commit"):
+        if stamp.get("version"):
             info.update(
-                commit=stamp["commit"],
+                commit=str(stamp["version"]),
                 date=stamp.get("date", info["date"]),
                 time=stamp.get("time", info["time"]),
                 source="stamp",
@@ -661,33 +662,56 @@ def save_report(report_text: str, dest_dir: Path) -> Path:
 #  همه چیز از یک مسیر: zip کل ریپو از codeload.github.com
 #  (بدون کلید API، بدون محدودیت نرخ)
 
-GITHUB_RAW = "https://raw.githubusercontent.com"
 GITHUB_ZIP = "https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}"
 
 
-def _http_get_bytes(url: str, timeout: float = 20.0) -> bytes | None:
+def _system_proxy() -> str | None:
+    """پروکسی سیستم ویندوز را می‌خواند (مثلاً v2rayN که پروکسی سیستم را ست می‌کند)."""
+    if not IS_WINDOWS:
+        return os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    try:
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        )
+        enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+        server, _ = winreg.QueryValueEx(key, "ProxyServer")
+        winreg.CloseKey(key)
+        if not enabled or not server:
+            return os.environ.get("HTTPS_PROXY")
+        if "=" in server:  # مثل http=127.0.0.1:10809;https=127.0.0.1:10809
+            for part in server.split(";"):
+                if part.lower().startswith("https="):
+                    server = part.split("=", 1)[1]
+                    break
+        return f"http://{server}"
+    except (OSError, ImportError, ValueError):
+        return os.environ.get("HTTPS_PROXY")
+
+
+def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes | None:
+    """دریافت محتوا؛ اگر پروکسی سیستم فعال باشد از آن استفاده می‌کند."""
     import urllib.error
     import urllib.request
+
+    handlers = []
+    proxy = _system_proxy()
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    opener = urllib.request.build_opener(*handlers)
 
     request = urllib.request.Request(
         url, headers={"User-Agent": "Windows-Agent", "Cache-Control": "no-cache"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             if response.status != 200:
                 return None
             return response.read()
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         return None
-
-
-def repo_version() -> str | None:
-    """محتوای version.txt در ریپو (کوچک و سریع، برای تشخیص تغییر)."""
-    url = f"{GITHUB_RAW}/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_VERSION_FILE}"
-    data = _http_get_bytes(url, timeout=10)
-    if not data:
-        return None
-    return data.decode("utf-8", errors="replace").strip()
 
 
 def repo_zip() -> bytes | None:
@@ -1238,37 +1262,38 @@ class AgentApp:
         threading.Thread(target=loop, daemon=True).start()
 
     def sync_once(self, force: bool = False) -> None:
-        version = repo_version()
-        if version is None:
+        """بسته کد را از گیت‌هاب می‌گیرد و در صورت تغییر اعمال می‌کند."""
+        data = repo_zip()
+        if not data:
             self._set_lamp(self.lamp_github, "bad", "قطع")
             return
 
+        version_bytes = extract_file(data, GITHUB_VERSION_FILE)
+        version = (
+            version_bytes.decode("utf-8", errors="replace").strip()
+            if version_bytes
+            else "?"
+        )
+        self._last_version = version
         self._set_lamp(self.lamp_github, "ok", version[:7])
 
-        if not force and version == self._last_version:
-            return
-        self._last_version = version
+        changed_app = self._update_app_if_needed(data, version)
+        if changed_app:
+            return  # برنامه ری‌استارت می‌شود
+        changed_codes = self._replace_codes(data)
+        if changed_codes or force:
+            self.run_pending_codes()
 
-        self.log(f"⬇️ نسخه {version} در گیت‌هاب — دریافت بسته کد…")
-        data = repo_zip()
-        if not data:
-            self.log("⚠️ دریافت بسته از گیت‌هاب ممکن نشد")
-            return
-
-        self._update_app_if_needed(data, version)
-        self._replace_codes(data)
-        self.run_pending_codes()
-
-    def _update_app_if_needed(self, data: bytes, version: str) -> None:
+    def _update_app_if_needed(self, data: bytes, version: str) -> bool:
         remote = extract_file(data, "app.py")
         if not remote:
-            return
+            return False
         here = Path(__file__).resolve()
         try:
             if remote == here.read_bytes():
-                return
+                return False
         except OSError:
-            return
+            return False
 
         import py_compile
         import tempfile
@@ -1283,7 +1308,7 @@ class AgentApp:
             Path(temp_path).unlink(missing_ok=True)
         except Exception as exc:
             self.log(f"⚠️ نسخه جدید سالم نیست، اعمال نشد: {exc}")
-            return
+            return False
 
         backup = here.with_name(f"app.backup-{datetime.now():%Y%m%d-%H%M%S}.py")
         try:
@@ -1291,7 +1316,25 @@ class AgentApp:
             here.write_bytes(remote)
         except OSError as exc:
             self.log(f"⚠️ نوشتن نسخه جدید ممکن نشد: {exc}")
-            return
+            return False
+
+        try:
+            import json
+
+            STAMP_FILE.write_text(
+                json.dumps(
+                    {
+                        "version": version,
+                        "date": jalali_date(tehran_now()),
+                        "time": f"{tehran_now():%H:%M}",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
         self.log(f"🔄 برنامه بروز شد (نسخه {version}) — پشتیبان: {backup.name}")
         if AUTO_RESTART_ON_UPDATE:
@@ -1302,8 +1345,9 @@ class AgentApp:
             except OSError:
                 pass
             os._exit(0)
+        return True
 
-    def _replace_codes(self, data: bytes) -> None:
+    def _replace_codes(self, data: bytes) -> bool:
         """محتویات پوشه codes ریپو جایگزین پوشه codes محلی می‌شود."""
         files = extract_folder(data, GITHUB_CODES_PATH)
         codes_dir = Path(CODES_DIR)
@@ -1311,7 +1355,7 @@ class AgentApp:
             codes_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             self.log(f"⚠️ ساخت پوشه codes ممکن نشد: {exc}")
-            return
+            return False
 
         removed = 0
         for existing in codes_dir.glob("*.py"):
@@ -1330,7 +1374,12 @@ class AgentApp:
             except OSError as exc:
                 self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
 
-        self.log(f"📁 پوشه codes جایگزین شد: {written} فایل" + (f"، {removed} حذف" if removed else ""))
+        changed = removed > 0
+        self.log(
+            f"📁 پوشه codes: {written} فایل"
+            + (f"، {removed} حذف‌شده" if removed else "")
+        )
+        return changed or written > 0
 
     def run_pending_codes(self) -> None:
         """کدهایی که تازه آمده‌اند یا تغییر کرده‌اند را اجرا می‌کند."""
@@ -1363,7 +1412,7 @@ class AgentApp:
             "اجراکننده کدهای جانبی",
             "=" * 58,
             f"منبع کد: github.com/{GITHUB_OWNER}/{GITHUB_REPO} ({GITHUB_BRANCH})",
-            f"آخرین نسخه دریافتی: {self._last_version or '—'}",
+            f"آخرین نسخه دریافتی: {getattr(self, '_last_version', None) or '—'}",
             f"پوشه کدها: {CODES_DIR}",
             f"پوشه نتیجه: {REPORT_DIR}",
             "",
