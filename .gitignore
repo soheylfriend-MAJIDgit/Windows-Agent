@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+error.log
+lmarena_*.png
+open_apps_report_*.txt
