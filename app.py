@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۰.۱
+Windows Agent — نسخه ۰.۲
 ------------------------
 یک رابط کاربری خیلی ساده با دو دکمه:
 
   ۱) باز کردن lmarena در کروم و گرفتن اسکرین‌شات از کل صفحه
-     (فعلاً ذخیره روی دسکتاپ)
+     (ذخیره در پوشه گوگل درایو)
   ۲) گرفتن گزارش از برنامه‌های باز ویندوز
 
 نحوه اجرا: فایل run.bat را دوبار کلیک کنید.
@@ -25,24 +25,28 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import scrolledtext, ttk
+from tkinter import scrolledtext
 
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.1"
+APP_VERSION = "0.2"
 
 LMARENA_URL = "https://lmarena.ai"
 
 # بعد از باز شدن کروم چند ثانیه صبر کنیم تا صفحه کامل لود شود
-PAGE_LOAD_SECONDS = 10
+PAGE_LOAD_SECONDS = 5
 
 # پیشوند نام فایل اسکرین‌شات
 SCREENSHOT_PREFIX = "lmarena"
 
-# در نسخه‌های بعدی این مسیر به گوگل درایو تغییر می‌کند.
-# الان طبق خواسته، اسکرین‌شات روی دسکتاپ ذخیره می‌شود.
-SCREENSHOT_DIR = None  # None یعنی دسکتاپ
+# مقصد ذخیره اسکرین‌شات: پوشه‌ی گوگل درایو روی ویندوز (Drive for Desktop)
+# اگر این مسیر در دسترس نباشد (مثلاً گوگل درایو اجرا نشده باشد)،
+# برنامه به‌جای خطا، اسکرین‌شات را روی دسکتاپ ذخیره می‌کند.
+SCREENSHOT_DIR = r"G:\My Drive\ScreenShots"
+
+# اگر پوشه گوگل درایو نبود، این‌جا ذخیره می‌شود (None یعنی دسکتاپ)
+FALLBACK_DIR = None
 
 IS_WINDOWS = os.name == "nt"
 
@@ -104,6 +108,31 @@ def get_desktop_dir() -> Path:
         if candidate.is_dir():
             return candidate
     return Path.home()
+
+
+def resolve_screenshot_dir() -> tuple[Path, bool]:
+    """پوشه مقصد اسکرین‌شات را برمی‌گرداند.
+
+    خروجی: (مسیر، آیا پوشه گوگل درایو استفاده شد؟)
+    اگر پوشه گوگل درایو در دسترس نباشد (درایو G: متصل نباشد یا Drive for Desktop
+    اجرا نشده باشد) به‌جای خطا، دسکتاپ را برمی‌گرداند.
+    """
+    if SCREENSHOT_DIR:
+        target = Path(SCREENSHOT_DIR)
+        if target.is_dir():
+            return target, True
+        # ممکن است پوشه وجود نداشته باشد ولی درایو (مثلاً G:) وصل باشد؛
+        # فقط در این حالت پوشه را می‌سازیم.
+        root = Path(target.anchor) if target.anchor else None
+        if root is not None and root.is_dir():
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                return target, True
+            except OSError:
+                pass
+
+    fallback = Path(FALLBACK_DIR) if FALLBACK_DIR else get_desktop_dir()
+    return fallback, False
 
 
 def find_chrome() -> str | None:
@@ -321,6 +350,15 @@ class AgentApp:
         self.log("دکمه اول: باز کردن lmarena در کروم و گرفتن اسکرین‌شات.")
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
         self.log("")
+
+        target = Path(SCREENSHOT_DIR) if SCREENSHOT_DIR else get_desktop_dir()
+        if target.is_dir():
+            self.log(f"✔ مسیر ذخیره اسکرین‌شات آماده است: {target}")
+        else:
+            self.log(f"⚠️ مسیر ذخیره پیدا نشد: {target}")
+            self.log("   Google Drive برای ویندوز را اجرا کنید تا درایو G: متصل شود.")
+            self.log("   تا آن موقع اسکرین‌شات‌ها روی دسکتاپ ذخیره می‌شوند.")
+        self.log("")
         if not IS_WINDOWS:
             self.log("⚠️ توجه: این برنامه برای ویندوز نوشته شده است.")
             self.log("   گرفتن اسکرین‌شات و گزارش پنجره‌ها فقط روی ویندوز کار می‌کند.")
@@ -405,7 +443,7 @@ class AgentApp:
 
         footer = tk.Label(
             self.root,
-            text="نسخه ۰.۱ — فعلاً اسکرین‌شات‌ها روی دسکتاپ ذخیره می‌شوند.",
+            text=f"نسخه ۰.۲ — اسکرین‌شات‌ها در {SCREENSHOT_DIR} ذخیره می‌شوند (درایو: G:)",
             font=("Segoe UI", 9),
             fg="#6b7691",
             bg="#f4f6fb",
@@ -462,8 +500,13 @@ class AgentApp:
         self._run_task("باز کردن lmarena و گرفتن اسکرین‌شات", self._job_capture)
 
     def _job_capture(self) -> None:
-        dest = Path(SCREENSHOT_DIR) if SCREENSHOT_DIR else get_desktop_dir()
-        self.log(f"پوشه مقصد: {dest}")
+        dest, on_drive = resolve_screenshot_dir()
+        if on_drive:
+            self.log(f"پوشه مقصد (گوگل درایو): {dest}")
+        else:
+            self.log(f"⚠️ پوشه گوگل درایو در دسترس نیست: {SCREENSHOT_DIR}")
+            self.log("   آیا Google Drive برای ویندوز در حال اجراست؟ (آیکون G در سینی)")
+            self.log(f"   این بار روی این مسیر ذخیره می‌شود: {dest}")
 
         self.log(f"باز کردن {LMARENA_URL} در کروم …")
         browser = open_in_chrome(LMARENA_URL)
@@ -471,13 +514,16 @@ class AgentApp:
 
         self.log(f"صبر می‌کنیم تا صفحه باز شود ({PAGE_LOAD_SECONDS} ثانیه) …")
         for remaining in range(PAGE_LOAD_SECONDS, 0, -1):
+            self.log(f"   … {remaining}")
             time.sleep(1)
-            if remaining % 5 == 0:
-                self.log(f"   … {remaining} ثانیه")
 
         self.log("در حال گرفتن اسکرین‌شات از کل صفحه …")
         path = take_screenshot(dest)
+        size_kb = path.stat().st_size / 1024 if path.exists() else 0
         self.log(f"✅ اسکرین‌شات ذخیره شد: {path}")
+        self.log(f"   حجم فایل: {size_kb:,.0f} کیلوبایت")
+        if on_drive:
+            self.log("   گوگل درایو به‌صورت خودکار آن را آپلود می‌کند؛ چند لحظه صبر کنید.")
         self.log("")
 
     # --- دکمه ۲: گزارش برنامه‌های باز ----------------------------------------
@@ -486,7 +532,7 @@ class AgentApp:
         self._run_task("گرفتن گزارش برنامه‌های باز", self._job_report)
 
     def _job_report(self) -> None:
-        dest = Path(SCREENSHOT_DIR) if SCREENSHOT_DIR else get_desktop_dir()
+        dest, _ = resolve_screenshot_dir()
 
         self.log("در حال خواندن پنجره‌های باز ویندوز …")
         windows = collect_open_windows()
