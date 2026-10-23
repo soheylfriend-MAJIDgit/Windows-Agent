@@ -34,7 +34,7 @@ from tkinter import scrolledtext, ttk
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "0.7"
+APP_VERSION = "0.7.1"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -55,6 +55,14 @@ STATUS_CHECK_SECONDS = 5
 #  تاریخچه تغییرات (تب «آخرین تغییرات»)
 # ------------------------------------------------------------------
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    (
+        "0.7.1",
+        "۱۴۰۵/۰۸/۰۲",
+        [
+            "تغییر آدرس هدف از lmarena به گوگل (تست مسیر بروزرسانی خودکار)",
+            "نام فایل اسکرین‌شات: google_تاریخ_جلالی.png",
+        ],
+    ),
     (
         "0.7",
         "۱۴۰۵/۰۸/۰۱",
@@ -114,13 +122,13 @@ CHANGELOG: list[tuple[str, str, list[str]]] = [
     ),
 ]
 
-LMARENA_URL = "https://lmarena.ai"
+LMARENA_URL = "https://www.google.com"
 
 # بعد از باز شدن کروم چند ثانیه صبر کنیم تا صفحه کامل لود شود
 PAGE_LOAD_SECONDS = 5
 
 # پیشوند نام فایل اسکرین‌شات
-SCREENSHOT_PREFIX = "lmarena"
+SCREENSHOT_PREFIX = "google"
 
 # ------------------------------------------------------------------
 #  مسیرهای ذخیره (همه داخل گوگل درایو)
@@ -890,7 +898,7 @@ class AgentApp:
             f"| تاریخ ساخت {self.build['date']} ساعت {self.build['time']} تهران"
         )
         self.log(f"فایل در حال اجرا: {Path(__file__).resolve()}")
-        self.log("دکمه اول: باز کردن lmarena در کروم و گرفتن اسکرین‌شات.")
+        self.log(f"دکمه اول: باز کردن {LMARENA_URL} در کروم و گرفتن اسکرین‌شات.")
         self.log("دکمه دوم: گزارش برنامه‌های باز ویندوز.")
         self.log("تب «آخرین تغییرات» تاریخچه نسخه‌ها را نشان می‌دهد.")
         self.log(f"تب «کدها» پوشه {CODES_DIR} را پایش می‌کند.")
@@ -1006,7 +1014,7 @@ class AgentApp:
 
         self.btn_capture = tk.Button(
             buttons_frame,
-            text="📸  باز کردن lmarena و گرفتن اسکرین‌شات",
+            text="📸  باز کردن سایت و گرفتن اسکرین‌شات",
             font=self.font_button,
             bg="#2f6fed",
             fg="white",
@@ -1488,7 +1496,7 @@ class AgentApp:
     # --- دکمه ۱: اسکرین‌شات --------------------------------------------------
 
     def action_capture(self) -> None:
-        self._run_task("باز کردن lmarena و گرفتن اسکرین‌شات", self._job_capture)
+        self._run_task("باز کردن سایت و گرفتن اسکرین‌شات", self._job_capture)
 
     def _job_capture(self) -> None:
         dest, on_drive = resolve_screenshot_dir()
