@@ -95,7 +95,8 @@ CODES_FOLDER_NAME = "CODES"
 # تنظیمات پیش‌فرض — همه چیز دستی است تا خودت روشنش کنی
 DEFAULT_SETTINGS = {
     "auto": False,          # یک کلید: خودکار یا دستی
-    "theme": "dark",        # dark یا light
+    "theme": "dark",        # dark یا light — پیش‌فرض تاریک
+    "theme_set_v16": False,  # یک‌بار در نسخه ۱.۶ تم روی تاریک تنظیم می‌شود
     # مخزن ایجنت مادر (خود برنامه)
     "mother_owner": "soheylfriend-MAJIDgit",
     "mother_repo": "Windows-Agent",
@@ -1100,6 +1101,11 @@ class Api:
 
     def __init__(self) -> None:
         self.settings = load_settings()
+        # نسخه ۱.۶ با تم تاریک شروع می‌شود؛ بعد از آن انتخاب کاربر می‌ماند.
+        if not self.settings.get("theme_set_v16"):
+            self.settings["theme"] = "dark"
+            self.settings["theme_set_v16"] = True
+            save_settings(self.settings)
         self.lock = threading.Lock()
         self.log_lines: list[str] = []
         self.busy: str | None = None
@@ -1111,6 +1117,12 @@ class Api:
         self._watch_stop = threading.Event()
         self._watch_running = False
         self.auto_next = 0.0
+        # شناسنامه‌ی ساخت یک‌بار خوانده می‌شود (git در هر ۰.۷ ثانیه اجرا نشود)
+        self.build = build_info()
+        self._shots_cache: list[dict] = []
+        self._shots_at = 0.0
+        self._paths_cache: dict = {}
+        self._paths_at = 0.0
         self._scan_codes()
         self._start_status_monitor()
         if self.settings.get("auto"):
@@ -1183,7 +1195,11 @@ class Api:
         return {
             "version": APP_VERSION,
             "version_fa": to_fa(APP_VERSION),
-            "build": build_info()["commit"],
+            "build": self.build.get("commit", "—"),
+            "build_date": to_fa(self.build.get("date", "—")),
+            "build_time": to_fa(self.build.get("time", "—")),
+            "build_subject": self.build.get("subject", ""),
+            "build_source": self.build.get("source_label", ""),
             "now": int(time.time() * 1000),
             "theme": self.settings.get("theme", "dark"),
             "muted": bool(self.settings.get("muted", False)),
@@ -1201,18 +1217,36 @@ class Api:
                 for key, value in self.status.items()
             },
             "codes": self.codes_index,
-            "shots": self._shots_index(),
+            "shots": self._cached_shots(),
             "mother": dict(zip(("owner", "repo", "branch"), self.mother_info())),
             "collab": dict(zip(("owner", "repo", "branch"), self.collab_info())),
-            "paths": {
+            "paths": self._cached_paths(),
+            "auto_accept": auto,   # در حالت خودکار هیچ‌وقت اجازه نمی‌گیرد
+        }
+
+    def _cached_shots(self) -> list[dict]:
+        """فهرست تصویرها را حداکثر هر ۳ ثانیه یک‌بار از دیسک می‌خواند."""
+        if time.time() - self._shots_at >= 3.0:
+            self._shots_cache = self._shots_index()
+            self._shots_at = time.time()
+        return self._shots_cache
+
+    def _cached_paths(self) -> dict:
+        """مسیرها هر ۱۵ ثانیه تازه می‌شوند (درایو ممکن است دیر وصل شود)."""
+        if not self._paths_cache or time.time() - self._paths_at >= 15.0:
+            self._paths_cache = {
                 "codes": str(get_desktop_dir() / CODES_FOLDER_NAME),
                 "logs": str(resolve_report_dir()[0]),
                 "shots": str(resolve_screenshot_dir()[0]),
                 "errors": str(error_dir()),
                 "state": str(STATE_DIR),
-            },
-            "auto_accept": auto,   # در حالت خودکار هیچ‌وقت اجازه نمی‌گیرد
-        }
+            }
+            self._paths_at = time.time()
+        return self._paths_cache
+
+    def _refresh_shots(self) -> None:
+        self._shots_cache = self._shots_index()
+        self._shots_at = time.time()
 
     def _shots_index(self) -> list[dict]:
         folder = Path(resolve_screenshot_dir()[0])
@@ -1468,6 +1502,7 @@ class Api:
                 self.busy = None
                 self.emit("idle")
                 self._scan_codes()
+                self._refresh_shots()
                 if self.settings.get("auto"):
                     self._arm_watch()
 
@@ -1669,16 +1704,30 @@ def main() -> None:
     api = Api()
     url = f"http://127.0.0.1:{port}/"
 
-    window = webview.create_window(
-        "ایجنت ویندوز — پنل ویندوز",
+    options = dict(
+        title="ایجنت ویندوز — پنل ویندوز",
         url=url,
         js_api=api,
         width=1180,
         height=820,
-        min_size=(940, 640),
+        min_size=(900, 600),
         background_color="#161511",
         text_select=False,
+        confirm_close=False,
+        resizable=True,
     )
+
+    # پنجره در حالت بزرگ (پرِ صفحه) باز می‌شود ولی اندازه‌اش قابل تغییر است.
+    # اگر نسخه‌ی نصب‌شده‌ی pywebview این گزینه‌ها را نداشت، به حالت ساده برمی‌گردیم.
+    window = None
+    for extra in ({"maximized": True}, {"fullscreen": True}, {}):
+        try:
+            window = webview.create_window(**{**options, **extra})
+            break
+        except TypeError:
+            continue
+    if window is None:
+        window = webview.create_window(**options)
 
     def on_loaded() -> None:
         try:

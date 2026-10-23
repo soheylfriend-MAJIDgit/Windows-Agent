@@ -153,8 +153,40 @@ html[data-theme='light'] .logo { color: #fff; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-.build { font-size: 12px; color: var(--text-dim); }
-.build b { color: var(--text); font-weight: 600; }
+/* جدول شناسنامه‌ی ساخت — کنار ساعت */
+.build-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  overflow: hidden;
+  font-size: 11.5px;
+  margin-inline-end: 2px;
+}
+.build-table th,
+.build-table td {
+  padding: 2px 9px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.build-table tr:last-child th,
+.build-table tr:last-child td { border-bottom: 0; }
+.build-table th {
+  font-weight: 500;
+  color: var(--text-dim);
+  text-align: right;
+  background: var(--surface-2);
+  border-inline-end: 1px solid var(--border);
+}
+.build-table td { text-align: left; }
+.build-table td b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+  display: inline-block;
+}
+.build-table .bt-sep { color: var(--text-dim); }
 
 .header-tools { display: flex; align-items: center; gap: 10px; }
 
@@ -197,34 +229,37 @@ html[data-theme='light'] #theme-btn svg .moon { display: inline; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 22px 0;
+  padding: 8px 22px 0;
 }
 
 .tabs {
   display: flex;
-  gap: 5px;
-  padding: 5px;
+  gap: 4px;
+  padding: 4px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 999px;
 }
 
 .tab {
-  flex: 1;
-  padding: 9px 14px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 8px;
   border: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
   font-family: inherit;
-  font-size: 14px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   transition: background .15s, color .15s;
 }
 .tab:hover { color: var(--text); }
@@ -237,16 +272,18 @@ html[data-theme='light'] #theme-btn svg .moon { display: inline; }
 html[data-theme='light'] .tab.active { color: #fff; }
 
 .tab .count {
-  min-width: 21px;
-  height: 21px;
-  padding: 0 6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
   border-radius: 999px;
   background: var(--warn);
   color: #16130f;
-  font-size: 12px;
+  font-size: 10.5px;
   font-weight: 700;
+  line-height: 1;
   display: inline-grid;
   place-items: center;
+  flex: 0 0 auto;
 }
 
 /* ─────────────────────────────── محتوا ─────────────────────────────── */
@@ -309,7 +346,7 @@ html[data-theme='light'] .tab.active { color: #fff; }
   stroke: var(--accent);
   stroke-dasharray: 263.9;
   stroke-dashoffset: 263.9;
-  transition: stroke-dashoffset .35s linear, stroke .3s;
+  transition: stroke .3s;
 }
 .ring-value.warn { stroke: var(--warn); }
 .ring-center {
@@ -722,12 +759,22 @@ html[data-theme='light'] .play-btn:hover { color: #fff; }
 
 /* ── واکنش‌گرایی ── */
 
+@media (max-width: 1180px) {
+  .build-table { font-size: 11px; }
+  .build-table th, .build-table td { padding: 2px 7px; }
+}
+
+@media (max-width: 1020px) {
+  .build-table { display: none; }
+}
+
 @media (max-width: 900px) {
   .grid-top { grid-template-columns: 1fr; }
   .fields { grid-template-columns: 1fr; }
   .header-tools .clock time { font-size: 20px; }
-  .tab { font-size: 12.5px; padding: 8px 8px; }
+  .tab { font-size: 11.5px; padding: 6px 4px; }
   .brand-text h1 { font-size: 18px; }
+  .logo { width: 48px; height: 48px; font-size: 16px; border-radius: 14px; }
 }
 
 /* حالت بی‌صدا / اسپینر کار */

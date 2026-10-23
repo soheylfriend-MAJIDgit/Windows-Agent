@@ -42,7 +42,7 @@
 owner  : soheylfriend-MAJIDgit
 repo   : Windows-Agent
 branch : arena/025c788f-windows-agent
-file   : version.txt   ← محتوای فعلی: 「1.6-1」
+file   : version.txt   ← محتوای فعلی: 「1.6-2」
 ```
 
 ساختار ریپو:

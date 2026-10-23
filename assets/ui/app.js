@@ -15,18 +15,14 @@
   var WEEKDAYS = ['شنبه', 'یک‌شنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنج‌شنبه', 'جمعه'];
 
   var TABS = [
-    [
-      { id: 'main', label: 'مغز ایجنت' },
-      { id: 'mother', label: 'ایجنت مادر' },
-      { id: 'collab', label: 'ایجنت همکار' },
-      { id: 'manage', label: 'ایجنت مدیریت' }
-    ],
-    [
-      { id: 'codes', label: 'کتابخانه کدها' },
-      { id: 'shots', label: 'اسکرین‌شات‌ها' },
-      { id: 'live', label: 'گزارش زنده' },
-      { id: 'changes', label: 'تغییرات' }
-    ]
+    { id: 'main', label: 'مغز ایجنت' },
+    { id: 'mother', label: 'ایجنت مادر' },
+    { id: 'collab', label: 'ایجنت همکار' },
+    { id: 'manage', label: 'ایجنت مدیریت' },
+    { id: 'codes', label: 'کتابخانه کدها' },
+    { id: 'shots', label: 'اسکرین‌شات‌ها' },
+    { id: 'live', label: 'گزارش زنده' },
+    { id: 'changes', label: 'تغییرات' }
   ];
 
   var CHANGELOG = [
@@ -34,9 +30,13 @@
       v: '۱.۶', d: '۱۴۰۵/۰۸/۰۲',
       items: [
         'رابط کاربری از pygame به یک صفحه‌ی وب داخلی (pywebview) منتقل شد.',
-        'کارت‌های گرد، فونت وزیرمتن، دو ردیف تب و ظاهر تازه با همان هشت بخش.',
-        'همه‌ی منطق قبلی دست‌نخورده ماند: بررسی مخزن، اجرای کدها، اسکرین‌شات، گزارش.',
-        'حالت دستی/خودکار، تم تاریک و روشن، صدا و بی‌صدا همه مثل قبل کار می‌کنند.'
+        'کارت‌های گرد، فونت وزیرمتن و ظاهر تازه با همان هشت بخش.',
+        'هشت تب کوچک در یک ردیف — همه با هم جا می‌شوند.',
+        'حلقه‌ی شمارش معکوس نرم و پیوسته پر می‌شود، نه تیک‌تیک؛ سه ثانیه‌ی آخر هر ثانیه بوق.',
+        'پنجره در حالت بزرگ (پرِ صفحه) باز می‌شود و اندازه‌اش قابل تغییر است.',
+        'جدول شناسنامه‌ی ساخت کنار ساعت: نسخه، شناسه و تاریخ/ساعت آخرین کامیت.',
+        'تم تاریک پیش‌فرض است؛ انتخاب کاربر بعد از آن ذخیره می‌شود.',
+        'همه‌ی منطق قبلی دست‌نخورده ماند: بررسی مخزن، اجرای کدها، اسکرین‌شات، گزارش.'
       ]
     },
     {
@@ -131,21 +131,20 @@
   /* ─────────────────────────────── تب‌ها ─────────────────────────────── */
 
   function buildTabs() {
-    TABS.forEach(function (row, index) {
-      var box = $('tabs-row-' + (index + 1));
-      row.forEach(function (tab) {
-        var btn = document.createElement('button');
-        btn.className = 'tab';
-        btn.type = 'button';
-        btn.dataset.tab = tab.id;
-        btn.textContent = tab.label;
-        btn.addEventListener('click', function () { setTab(tab.id); });
-        box.appendChild(btn);
-      });
+    var box = $('tabs-row-1');
+    TABS.forEach(function (tab) {
+      var btn = document.createElement('button');
+      btn.className = 'tab';
+      btn.type = 'button';
+      btn.dataset.tab = tab.id;
+      btn.textContent = tab.label;
+      btn.title = tab.label;
+      btn.addEventListener('click', function () { setTab(tab.id); });
+      box.appendChild(btn);
     });
     var saved = null;
     try { saved = localStorage.getItem('wa.tab'); } catch (e) { }
-    var ok = TABS[0].concat(TABS[1]).some(function (t) { return t.id === saved; });
+    var ok = TABS.some(function (t) { return t.id === saved; });
     setTab(ok ? saved : 'main');
   }
 
@@ -200,6 +199,11 @@
 
     $('version').textContent = s.version_fa || fa(s.version);
     $('build').textContent = s.build || '—';
+    $('build-date').textContent = s.build_date || '—';
+    $('build-time').textContent = s.build_time || '—';
+    $('build-table').title =
+      'شناسنامه‌ی ساخت' + (s.build_subject ? '\n' + s.build_subject : '') +
+      (s.build_source ? '\nمنبع: ' + s.build_source : '');
 
     $('mute-btn').classList.toggle('active', !!s.muted);
     $('theme-btn').title = s.theme === 'light' ? 'رفتن به تم تاریک' : 'رفتن به تم روشن';
@@ -217,7 +221,6 @@
   }
 
   function renderMode(s) {
-    var ring = $('ring');
     var num = $('ring-number');
     var label = $('ring-label');
     var title = $('mode-title');
@@ -227,36 +230,64 @@
     sw.checked = !!s.auto;
     document.body.classList.toggle('busy', !!s.busy);
 
-    var total = 263.9;
-    var fraction = 0;
-
     if (s.busy) {
       title.textContent = 'در حال کار';
       title.classList.add('on');
       hint.textContent = s.busy;
       num.textContent = '…';
       label.textContent = 'صبر کن';
-      fraction = 0.35;
-      ring.classList.remove('warn');
+      ringState = { mode: 'busy', remaining: 0, total: 0, receivedAt: performance.now() };
     } else if (s.auto) {
       title.textContent = 'خودکار';
       title.classList.add('on');
       hint.textContent = 'هر ' + fa(s.auto_total) + ' ثانیه مخزن همکار بررسی می‌شود؛ بدون پرسیدن.';
-      num.textContent = fa(Math.ceil(s.auto_remaining));
       label.textContent = 'تا دور بعد';
-      fraction = s.auto_total ? Math.max(0, Math.min(1, 1 - s.auto_remaining / s.auto_total)) : 0;
-      ring.classList.toggle('warn', s.auto_remaining <= 3);
+      ringState = {
+        mode: 'auto',
+        remaining: Number(s.auto_remaining) || 0,
+        total: Number(s.auto_total) || 10,
+        receivedAt: performance.now()
+      };
     } else {
       title.textContent = 'دستی';
       title.classList.remove('on');
       hint.textContent = 'هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود.';
       num.textContent = '—';
       label.textContent = 'دستی';
-      fraction = 0;
-      ring.classList.remove('warn');
+      ringState = { mode: 'manual', remaining: 0, total: 0, receivedAt: performance.now() };
+      $('ring').classList.remove('warn');
+    }
+  }
+
+  /* حلقه‌ی شمارش معکوس: هر فریم (۶۰ بار در ثانیه) کشیده می‌شود، نه پرشی */
+  var CIRC = 2 * Math.PI * 42;
+  var ringState = { mode: 'manual', remaining: 0, total: 10, receivedAt: 0 };
+  var lastTickSec = null;
+
+  function animateRing(ts) {
+    var el = $('ring');
+    var fraction = 0;
+
+    if (ringState.mode === 'auto') {
+      var elapsed = (ts - ringState.receivedAt) / 1000;
+      var rem = Math.max(0, ringState.remaining - elapsed);
+      fraction = ringState.total ? Math.min(1, Math.max(0, 1 - rem / ringState.total)) : 0;
+
+      var secs = Math.ceil(rem);
+      if ($('ring-number').textContent !== fa(secs)) $('ring-number').textContent = fa(secs);
+
+      /* سه ثانیه‌ی آخر: هر ثانیه یک بوق */
+      if (secs !== lastTickSec) {
+        if (secs > 0 && secs <= 3) play('tick');
+        lastTickSec = secs;
+      }
+      el.classList.toggle('warn', rem <= 3);
+    } else if (ringState.mode === 'busy') {
+      fraction = 0.35;
     }
 
-    ring.style.strokeDashoffset = String(total * (1 - fraction));
+    el.style.strokeDashoffset = String(CIRC * (1 - fraction));
+    requestAnimationFrame(animateRing);
   }
 
   function renderStats(s) {
@@ -669,6 +700,7 @@
     buildChangelog();
     tickClock();
     setInterval(tickClock, 1000);
+    requestAnimationFrame(animateRing);
 
     /* صدای اولین کلیک کاربر (WebView تا کلیک اول صدا را پخش نمی‌کند) */
     var unlock = function () { document.removeEventListener('pointerdown', unlock); };
