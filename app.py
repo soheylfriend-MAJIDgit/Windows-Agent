@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Windows Agent — نسخه ۱.۳
+Windows Agent — نسخه ۱.۶
 ------------------------
-رابط کاربری با pygame (گرافیک برداری، سایه، انیمیشن و صدا)
+رابط کاربری وب‌محور با pywebview (HTML + CSS + JS)
 
-  ۱) باز کردن سایت در کروم و گرفتن اسکرین‌شات (ذخیره در گوگل درایو)
-  ۲) گرفتن گزارش از برنامه‌های باز ویندوز
-  ۳) بررسی مخزن ایجنت همکار ← ذخیره در CODES روی دسکتاپ ← اجرا
-  ۴) کتابخانه کدها با دکمه پخش برای اجرای مجدد
-  + کلید حالت دستی/خودکار با تایمر دایره‌ای و افکت صوتی
+  ۱) مغز ایجنت: کلید دستی/خودکار، تایمر دایره‌ای، آمار کدها
+  ۲) ایجنت مادر / ایجنت همکار / ایجنت مدیریت
+  ۳) کتابخانه کدها با دکمه پخش برای اجرای مجدد
+  ۴) اسکرین‌شات‌ها و گزارش زنده
+  ۵) اسکرین‌شات صفحه و گزارش برنامه‌های باز ویندوز
+
+معماری: بک‌اند پایتون (همین فایل) + یک وب‌سرور محلی روی ۱۲۷.۰.۰.۱
+که صفحه را در یک پنجره‌ی WebView2 نشان می‌دهد. هیچ فایلی کنار برنامه نوشته نمی‌شود.
 
 نحوه اجرا: فایل run.bat را دوبار کلیک کنید (کتابخانه‌های لازم را خودش نصب می‌کند).
 """
@@ -17,7 +20,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import queue
 import socket
 import subprocess
 import sys
@@ -31,7 +33,7 @@ from pathlib import Path
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -49,167 +51,8 @@ TEHRAN = timezone(timedelta(hours=3, minutes=30), "Tehran")
 STATUS_CHECK_SECONDS = 5
 
 # ------------------------------------------------------------------
-#  تاریخچه تغییرات (تب «آخرین تغییرات»)
+#  تاریخچه‌ی نسخه‌ها در سمت رابط کاربری است: assets/ui/app.js → CHANGELOG
 # ------------------------------------------------------------------
-CHANGELOG: list[tuple[str, str, list[str]]] = [
-    (
-        "1.5",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "به‌روزرسانی خودکار برنامه حذف شد — فقط با گیت‌هاب دسکتاپ",
-            "تب «عملیات» به «مغز ایجنت» تغییر نام داد",
-            "هشت تب در دو ردیف: مغز ایجنت، ایجنت مادر، ایجنت همکار، ایجنت مدیریت، کتابخانه کدها، اسکرین‌شات‌ها، گزارش زنده، تغییرات",
-            "دکمه‌های اسکرین‌شات و گزارش از تب اصلی حذف شد",
-            "نام و لوگو: «ایجنت ویندوز» با نشان «پنل ویندوز»",
-            "چیپ‌های وضعیت وسط کارت و متن وسط‌چین عمودی شدند",
-            "تب اسکرین‌شات‌ها با پیش‌نمایش تصویرها",
-        ],
-    ),
-    (
-        "1.4",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "فونت کل برنامه بزرگ‌تر شد (مقیاس ۱.۵۵)",
-            "کلید قطع صدا به بالا-چپ هدر منتقل شد",
-            "نوار تب‌ها از راست چیده می‌شود",
-            "گزارش زنده دوستونه شد: ساعت در چپ، متن راست",
-            "پنجره تأیید به اندازه متن باز می‌شود",
-        ],
-    ),
-    (
-        "1.3",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "رابط کاربری از Tkinter به pygame منتقل شد",
-            "گرافیک برداری: کارت‌های گرد، سایه، انیمیشن و حالت هاور",
-            "افکت صوتی برای کلیک، باز شدن، اجرا، موفقیت، خطا و شاتر",
-            "تایمر دایره‌ای برای شمارش معکوس حالت خودکار",
-            "تب «کتابخانه کدها» با دکمه پخش برای اجرای مجدد هر کد",
-            "run.bat کتابخانه‌های لازم را خودش نصب می‌کند",
-        ],
-    ),
-    (
-        "1.2",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "رابط کاربری کامل بازطراحی شد",
-            "تم تاریک و روشن با کلید تغییر تم در هدر",
-            "فونت وزیرمتن همراه برنامه",
-            "کلید کشویی گرد برای حالت دستی/خودکار",
-            "تب‌های کپسولی، کارت‌ها و نوار وضعیت تازه",
-            "ساعت و تاریخ جلالی زنده در هدر",
-            "مخزن ایجنت مادر در برنامه قابل تنظیم شد",
-        ],
-    ),
-    (
-        "1.1",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "هیچ فایلی در پوشه خود برنامه ذخیره نمی‌شود",
-            "تنظیمات و وضعیت در پوشه کاربر (LOCALAPPDATA) ذخیره می‌شوند",
-            "پشتیبان نسخه قبلی هم در همان پوشه است، نه کنار app.py",
-            "همه خطاها در Google Drive\logs\errors ذخیره می‌شوند",
-            "خطای دریافت مخزن، خطای اجرا و خطای شروع همه ثبت می‌شوند",
-        ],
-    ),
-    (
-        "1.0",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "پوشه codes از مخزن خودمان حذف شد",
-            "مخزن ایجنت همکار جداگانه بررسی می‌شود",
-            "کدها در پوشه CODES روی دسکتاپ ذخیره می‌شوند",
-            "یک کلید: حالت دستی (هر مرحله اجازه) یا حالت خودکار",
-            "مخزن و شاخه ایجنت همکار داخل خود برنامه قابل تنظیم است",
-        ],
-    ),
-    (
-        "0.9",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "ساختار ساده شد: گوگل درایو فقط ScreenShots و logs",
-            "پوشه codes محلی است و از گیت‌هاب جایگزین می‌شود",
-            "با هر کامیت (تغییر version.txt) بسته کد از گیت‌هاب گرفته می‌شود",
-            "نتیجه هر کد در logs گوگل درایو ذخیره می‌شود تا Arena بخواند",
-            "هیچ کاری خودکار انجام نمی‌شود؛ سه کلید کنترل در بالای پنجره",
-            "با باز شدن برنامه هیچ کدی دریافت یا اجرا نمی‌شود",
-        ],
-    ),
-    (
-        "0.8",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "پایش پوشه گوگل درایو از طریق لینک عمومی (بدون سینک محلی، بدون تأخیر)",
-            "هر ۱۰ ثانیه فهرست پوشه از سرور گوگل خوانده می‌شود",
-            "کدهای job_*.py که در آن پوشه گذاشته شوند خودکار دانلود و اجرا می‌شوند",
-        ],
-    ),
-    (
-        "0.7.1",
-        "۱۴۰۵/۰۸/۰۲",
-        [
-            "تغییر آدرس هدف از lmarena به گوگل (تست مسیر بروزرسانی خودکار)",
-            "نام فایل اسکرین‌شات: google_تاریخ_جلالی.png",
-        ],
-    ),
-    (
-        "0.7",
-        "۱۴۰۵/۰۸/۰۱",
-        [
-            "دریافت فوری کد از گیت‌هاب (بدون انتظار برای سینک گوگل درایو)",
-            "بروزرسانی خودکار برنامه در چند ثانیه پس از هر پوش",
-            "دریافت کدهای جانبی از پوشه jobs در ریپو و اجرای خودکار",
-            "گوگل درایو فقط برای اسکرین‌شات و گزارش‌ها و نتایج می‌ماند",
-        ],
-    ),
-    (
-        "0.6",
-        "۱۴۰۵/۰۸/۰۱",
-        [
-            "اجراکننده کدهای جانبی داخل خود برنامه (تب «کدها»)",
-            "هر فایل job_*.py در پوشه Codes به‌صورت خودکار شناسایی و اجرا می‌شود",
-            "رفع خطای انکودینگ فارسی در خروجی کدهای اجراشده",
-            "نتیجه هر اجرا در پوشه out ذخیره و در تب کدها نمایش داده می‌شود",
-        ],
-    ),
-    (
-        "0.5",
-        "۱۴۰۵/۰۸/۰۱",
-        [
-            "نمایش نسخه، هش کامیت و تاریخ ساخت (جلالی + ساعت تهران) در هدر",
-            "تب جدید «آخرین تغییرات» برای دیدن تاریخچه در خود برنامه",
-            "چراغ وضعیت اینترنت و چراغ وضعیت اتصال گوگل درایو",
-            "نام فایل‌ها با تاریخ جلالی و ساعت تهران",
-            "حذف پنجره‌های تکراری در گزارش برنامه‌های باز",
-            "فیلتر کردن خود برنامه از فهرست پنجره‌ها",
-        ],
-    ),
-    (
-        "0.3",
-        "۱۴۰۵/۰۸/۰۱",
-        [
-            "اسکرین‌شات‌ها در My Drive/Windows-Agent-DB/ScreenShots",
-            "گزارش‌ها در My Drive/Windows-Agent-DB/logs",
-            "اگر گوگل درایو نبود، ذخیره موقت روی دسکتاپ با هشدار",
-        ],
-    ),
-    (
-        "0.2",
-        "۱۴۰۵/۰۸/۰۱",
-        [
-            "کاهش زمان انتظار از ۱۰ به ۵ ثانیه",
-            "ذخیره در گوگل درایو به‌جای دسکتاپ",
-        ],
-    ),
-    (
-        "0.1",
-        "۱۴۰۵/۰۸/۰۱",
-        [
-            "نسخه اول: باز کردن lmarena در کروم و گرفتن اسکرین‌شات",
-            "گزارش برنامه‌های باز ویندوز",
-        ],
-    ),
-]
 
 LMARENA_URL = "https://www.google.com"
 
@@ -1105,7 +948,7 @@ def check_google_drive() -> tuple[bool, str]:
     for path in options:
         try:
             if path.is_dir():
-                return True, f"مسیر در دسترس است"
+                return True, "مسیر در دسترس است"
         except OSError:
             continue
 
@@ -1126,1425 +969,187 @@ def check_google_drive() -> tuple[bool, str]:
     return False, "در دسترس نیست"
 
 
-# ============================================================ گرافیک pygame ===
 
-import colorsys
-import math
+# =============================================================== سرور محلی ===
+#
+#  یک وب‌سرور کوچک روی ۱۲۷.۰.۰.۱ که سه چیز را سرو می‌کند:
+#    /            → assets/ui/index.html
+#    /ui/...      → فایل‌های رابط (css/js)
+#    /fonts/...   → فونت وزیرمتن
+#    /sounds/...  → افکت‌های صوتی
+#    /shots/...   → اسکرین‌شات‌ها (فقط تصویر، مسیر امن)
+#  بقیه‌ی مسیرها ۴۰۴ می‌شوند. هیچ‌چیز بیرون از این‌ها سرو نمی‌شود.
 
-try:
-    import pygame
-except ImportError:  # run.bat نصبش می‌کند
-    pygame = None
+import mimetypes
+import re
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# ------------------------------------------------------------ رنگ و سایه ---
+UI_DIR = LOCAL_BASE_DIR / "assets" / "ui"
+UI_INDEX = UI_DIR / "index.html"
+ASSETS_DIR = LOCAL_BASE_DIR / "assets"
 
-
-def hex_rgb(value: str) -> tuple[int, int, int]:
-    value = value.lstrip("#")
-    return tuple(int(value[i: i + 2], 16) for i in (0, 2, 4))
-
-
-def mix(a, b, t: float):
-    """ترکیب دو رنگ."""
-    ca, cb = hex_rgb(a) if isinstance(a, str) else a, hex_rgb(b) if isinstance(b, str) else b
-    return tuple(int(ca[i] + (cb[i] - ca[i]) * t) for i in range(3))
-
-
-def lighten(color, amount: float):
-    c = hex_rgb(color) if isinstance(color, str) else color
-    return tuple(min(255, int(v + (255 - v) * amount)) for v in c)
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.\-]+$")
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
-def darken(color, amount: float):
-    c = hex_rgb(color) if isinstance(color, str) else color
-    return tuple(max(0, int(v * (1 - amount))) for v in c)
+class _Handler(BaseHTTPRequestHandler):
+    server_version = "WindowsAgentUI/1.6"
 
+    def log_message(self, *_args) -> None:  # بی‌صدا
+        pass
 
-def with_alpha(color, alpha: int):
-    c = hex_rgb(color) if isinstance(color, str) else color
-    return (c[0], c[1], c[2], max(0, min(255, alpha)))
+    # ---------------------------------------------------------------- کمکی ---
 
-
-# ------------------------------------------------------------ متن فارسی ---
-
-try:
-    import re
-
-    import arabic_reshaper
-    from bidi.algorithm import get_display
-
-    _RESHAPER = arabic_reshaper.ArabicReshaper(
-        configuration={"delete_harakat": False, "support_ligatures": True}
-    )
-
-    # اعداد و کلمات لاتین باید چپ‌به‌راست بمانند (ساعت، نسخه، لینک)
-    _LTR_RUN = re.compile(
-        r"([A-Za-z0-9\u06F0-\u06F9\u0660-\u0669][A-Za-z0-9\u06F0-\u06F9\u0660-\u0669:/._\-+%#@?=&]*)"
-    )
-
-    def shape_text(text: str) -> str:
-        """چسباندن حروف فارسی، ترتیب راست‌به‌چپ، و نگه‌داشتن اعداد/لاتین."""
+    def _send(self, status: int, body: bytes, ctype: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
         try:
-            guarded = _LTR_RUN.sub("\u202a" + r"\1" + "\u202c", text)
-            return get_display(_RESHAPER.reshape(guarded))
-        except Exception:
-            return text
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
-except Exception:  # اگر کتابخانه نبود، متن خام نمایش داده می‌شود
-
-    def shape_text(text: str) -> str:
-        return text
-
-
-class Fonts:
-    """مدیریت فونت‌های وزیرمتن با کش."""
-
-    def __init__(self) -> None:
-        self.dir = LOCAL_BASE_DIR / "assets" / "fonts"
-        self.cache: dict[tuple[int, bool], "pygame.font.Font"] = {}
-        self.shape_cache: dict[str, str] = {}
-
-    def _path(self, bold: bool):
-        name = "Vazirmatn-Bold.ttf" if bold else "Vazirmatn-Regular.ttf"
-        candidate = self.dir / name
-        return candidate if candidate.is_file() else None
-
-    def get(self, size: int, bold: bool = False):
-        size = max(11, int(round(size * FONT_SCALE)))
-        key = (size, bold)
-        if key not in self.cache:
-            path = self._path(bold)
-            if path:
-                self.cache[key] = pygame.font.Font(str(path), size)
-            else:
-                self.cache[key] = pygame.font.SysFont("tahoma,arial", size, bold=bold)
-        return self.cache[key]
-
-    def shaped(self, text: str) -> str:
-        if text not in self.shape_cache:
-            if len(self.shape_cache) > 800:
-                self.shape_cache.clear()
-            self.shape_cache[text] = shape_text(text)
-        return self.shape_cache[text]
-
-    def render(self, text: str, size: int, color, bold: bool = False):
-        return self.get(size, bold).render(self.shaped(text), True, color)
-
-    def width(self, text: str, size: int, bold: bool = False) -> int:
-        return self.get(size, bold).size(self.shaped(text))[0]
-
-    def wrap(self, text: str, size: int, max_width: int, bold: bool = False) -> list[str]:
-        """شکستن متن به سطرهای جا‌شده در عرض مشخص."""
-        words = text.split(" ")
-        lines: list[str] = []
-        current = ""
-        for word in words:
-            trial = f"{current} {word}".strip()
-            if self.width(trial, size, bold) <= max_width or not current:
-                current = trial
-            else:
-                lines.append(current)
-                current = word
-        if current:
-            lines.append(current)
-        return lines or [""]
-
-
-# --------------------------------------------------------------- صدا ---
-
-
-class Sounds:
-    """افکت‌های صوتی؛ اگر دستگاه صدا نبود، برنامه بدون صدا کار می‌کند."""
-
-    NAMES = ("click", "toggle", "open", "run", "success", "error", "shutter", "tick", "notify")
-
-    def __init__(self, muted: bool = False) -> None:
-        self.enabled = False
-        self.muted = muted
-        self.bank: dict[str, "pygame.mixer.Sound"] = {}
+    def _file(self, path: Path, ctype: str | None = None) -> None:
         try:
-            pygame.mixer.pre_init(44100, -16, 1, 512)
-            pygame.mixer.init()
-            self.enabled = True
-        except Exception:
+            body = path.read_bytes()
+        except OSError:
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        if ctype is None:
+            ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+                ctype += "; charset=utf-8"
+        self._send(200, body, ctype)
+
+    def _safe_child(self, root: Path, name: str) -> Path | None:
+        if not _SAFE_NAME.match(name):
+            return None
+        target = (root / name).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            return None
+        return target
+
+    # ------------------------------------------------------------------ GET ---
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+
+        if path in ("/", "/index.html"):
+            self._file(UI_INDEX, "text/html; charset=utf-8")
             return
 
-        folder = LOCAL_BASE_DIR / "assets" / "sounds"
-        for name in self.NAMES:
-            path = folder / f"{name}.wav"
-            if path.is_file():
-                try:
-                    sound = pygame.mixer.Sound(str(path))
-                    sound.set_volume(0.55)
-                    self.bank[name] = sound
-                except Exception:
-                    pass
-
-    def play(self, name: str) -> None:
-        if not self.enabled or self.muted:
+        if path.startswith("/ui/"):
+            target = self._safe_child(UI_DIR, path[4:])
+            if target:
+                self._file(target)
+                return
+            self._send(404, b"not found", "text/plain; charset=utf-8")
             return
-        sound = self.bank.get(name)
-        if sound:
-            try:
-                sound.play()
-            except Exception:
-                pass
 
-    def toggle_mute(self) -> bool:
-        self.muted = not self.muted
-        return self.muted
+        if path.startswith("/fonts/"):
+            target = self._safe_child(ASSETS_DIR / "fonts", path[7:])
+            if target:
+                self._file(target, "font/ttf")
+                return
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
 
+        if path.startswith("/sounds/"):
+            target = self._safe_child(ASSETS_DIR / "sounds", path[8:])
+            if target:
+                self._file(target, "audio/wav")
+                return
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
 
-# ------------------------------------------------------------- شکل‌ها ---
+        if path.startswith("/shots/"):
+            shots_dir, _ = resolve_screenshot_dir()
+            target = self._safe_child(Path(shots_dir), path[7:])
+            if target and target.suffix.lower() in IMAGE_EXT:
+                self._file(target)
+                return
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
 
-
-def rounded(surface, rect, radius, color, width: int = 0) -> None:
-    pygame.draw.rect(surface, color, rect, width=width, border_radius=int(radius))
-
-
-def shadow(surface, rect, radius, spread: int = 10, alpha: int = 55) -> None:
-    """سایه نرم زیر کارت (چند لایه با شفافیت کم)."""
-    layer = pygame.Surface((rect.width + spread * 2, rect.height + spread * 2), pygame.SRCALPHA)
-    for i in range(spread, 0, -2):
-        a = int(alpha * (1 - i / spread) ** 1.4)
-        if a <= 0:
-            continue
-        box = pygame.Rect(spread - i, spread - i + 3, rect.width + i * 2, rect.height + i * 2)
-        pygame.draw.rect(layer, (0, 0, 0, a), box, border_radius=int(radius + i))
-    surface.blit(layer, (rect.x - spread, rect.y - spread))
+        self._send(404, b"not found", "text/plain; charset=utf-8")
 
 
-def gradient_rect(size, color_a, color_b) -> "pygame.Surface":
-    """مستطیل با گرادیان عمودی."""
-    w, h = size
-    surf = pygame.Surface((w, h))
-    ca, cb = hex_rgb(color_a), hex_rgb(color_b)
-    for y in range(h):
-        t = y / max(1, h - 1)
-        pygame.draw.line(surf, mix(ca, cb, t), (0, y), (w, y))
-    return surf
+def start_ui_server() -> tuple[ThreadingHTTPServer, int]:
+    """سرور محلی رابط را روی یک پورت آزاد بالا می‌آورد."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server.daemon_threads = True
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, port
 
 
-def draw_ring(
-    surface,
-    center,
-    radius: int,
-    progress: float,
-    color,
-    track_color,
-    width: int = 6,
-    start: float = 90.0,
-) -> None:
-    """حلقه شمارش معکوس."""
-    box = pygame.Rect(0, 0, radius * 2, radius * 2)
-    box.center = center
-    pygame.draw.circle(surface, track_color, center, radius, width)
-    progress = max(0.0, min(1.0, progress))
-    if progress <= 0.001:
-        return
-    steps = max(3, int(72 * progress))
-    for i in range(steps):
-        a0 = math.radians(start - 360 * progress * i / steps)
-        a1 = math.radians(start - 360 * progress * (i + 1) / steps)
-        p0 = (center[0] + radius * math.cos(a0), center[1] - radius * math.sin(a0))
-        p1 = (center[0] + radius * math.cos(a1), center[1] - radius * math.sin(a1))
-        pygame.draw.line(surface, color, p0, p1, width)
-    angle = math.radians(start - 360 * progress)
-    tip = (center[0] + radius * math.cos(angle), center[1] - radius * math.sin(angle))
-    pygame.draw.circle(surface, color, tip, max(2, width // 2 + 1))
+# ============================================================== پل پایتون↔JS ===
+#
+#  همه‌ی متدهای این کلاس از سمت جاوااسکریپت با window.pywebview.api صدا زده
+#  می‌شوند و باید دیکشنری قابل تبدیل به JSON برگردانند.
+
+POLL_SECONDS = 0.7
 
 
-def draw_spinner(surface, center, radius: int, angle: float, color, width: int = 4) -> None:
-    """نشانگر چرخان برای کارهای در حال انجام."""
-    steps = 24
-    for i in range(steps):
-        a0 = math.radians(angle - 300 * i / steps)
-        a1 = math.radians(angle - 300 * (i + 1) / steps)
-        alpha = 1 - i / steps
-        base = hex_rgb(color) if isinstance(color, str) else color
-        col = mix(base, (24, 24, 20), 1 - alpha)
-        p0 = (center[0] + radius * math.cos(a0), center[1] - radius * math.sin(a0))
-        p1 = (center[0] + radius * math.cos(a1), center[1] - radius * math.sin(a1))
-        pygame.draw.line(surface, col, p0, p1, width)
-# ============================================================== رابط کاربری ===
-
-WIN_W, WIN_H = 1160, 800
-HEADER_H = 96
-TABS_H = 118
-FOOTER_H = 54
-PAD = 20
-
-# بزرگ‌نمایی کلی متن‌ها (برنامه برای خوانایی روی مانیتور معمولی)
-FONT_SCALE = 1.55
-
-TABS = [
-    ("main", "مغز ایجنت"),
-    ("mother", "ایجنت مادر"),
-    ("collab", "ایجنت همکار"),
-    ("manage", "ایجنت مدیریت"),
-    ("codes", "کتابخانه کدها"),
-    ("shots", "اسکرین‌شات‌ها"),
-    ("live", "گزارش زنده"),
-    ("changes", "تغییرات"),
-]
-TAB_ROWS = [TABS[:4], TABS[4:]]
-
-
-class App:
-    """پنجره اصلی — همه اجزا با pygame کشیده می‌شوند."""
+class Api:
+    """کارهای برنامه؛ رابط کاربری فقط این‌ها را صدا می‌زند."""
 
     def __init__(self) -> None:
-        pygame.init()
-        pygame.display.set_caption(f"{APP_TITLE} — نسخه {APP_VERSION}")
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
-        self.clock = pygame.time.Clock()
-        self.fonts = Fonts()
-
         self.settings = load_settings()
-        self.theme_name = self.settings.get("theme", "dark")
-        if self.theme_name not in THEMES:
-            self.theme_name = "dark"
-        self.c = THEMES[self.theme_name]
-
-        self.sounds = Sounds(muted=bool(self.settings.get("muted", False)))
-        self.events: queue.Queue = queue.Queue()
+        self.lock = threading.Lock()
         self.log_lines: list[str] = []
-
-        self.running = True
         self.busy: str | None = None
-        self.tab = "main"
-        self.scroll = {key: 0.0 for key, _ in TABS}
-        self.scroll_target = {key: 0.0 for key, _ in TABS}
-        self.view_rect = pygame.Rect(0, 0, 0, 0)
-
-        self.mouse = (-100, -100)
-        self.hits: list[tuple[pygame.Rect, object]] = []
-        self.modal: dict | None = None
-        self.toast: dict | None = None
-        self.focus_field = None
-        self.caret_on = True
-        self.caret_t = 0.0
-        self.t0 = time.monotonic()
-
-        self.switch_pos = 1.0 if self.settings.get("auto") else 0.0
-        self.auto_next = 0.0
-        self.auto_auto_armed = False
-
-        self.status = {"internet": None, "drive": None, "repo": None, "collab": None}
+        self.events: list[dict] = []
+        self.status: dict[str, bool | None] = {
+            "internet": None, "drive": None, "repo": None, "collab": None,
+        }
         self.status_note = {"internet": "…", "drive": "…", "repo": "…", "collab": "…"}
-
-        self.codes_index: list[dict] = []
-        self.codes_loaded_at = 0.0
-        self._last_version: str | None = None
-        self._busy_started = 0.0
-        self._spinner = 0.0
-
-        ensure_codes_dir()
+        self._watch_stop = threading.Event()
+        self._watch_running = False
+        self.auto_next = 0.0
         self._scan_codes()
-        self.log(f"به {APP_TITLE} خوش آمدید — نسخه {to_fa(APP_VERSION)}")
-        self.log(f"پوشه کدها: {get_desktop_dir() / CODES_FOLDER_NAME}")
-        self.log("حالت دستی — هیچ کاری بدون اجازه تو انجام نمی‌شود.")
         self._start_status_monitor()
         if self.settings.get("auto"):
-            self._arm_auto()
+            self._arm_watch()
 
-    # ----------------------------------------------------------- کمکی‌ها ---
+        self.log(f"به ایجنت ویندوز خوش آمدید — نسخه {to_fa(APP_VERSION)}")
+        self.log(f"پوشه کدها: {get_desktop_dir() / CODES_FOLDER_NAME}")
+        self.log("حالت دستی — هیچ کاری بدون اجازه تو انجام نمی‌شود.")
+        m_owner, m_repo, m_branch = self.mother_info()
+        c_owner, c_repo, c_branch = self.collab_info()
+        self.log(f"مخزن مادر: {m_owner}/{m_repo} @ {m_branch}")
+        self.log(f"مخزن همکار: {c_owner}/{c_repo} @ {c_branch}")
+        self.log("برنامه خودکار به‌روزرسانی نمی‌شود (به‌روزرسانی دستی از گیت‌هاب).")
 
-    def c_(self, key: str):
-        """رنگ از کلید تم یا کد رنگ مستقیم."""
-        if isinstance(key, str) and key.startswith("#"):
-            return hex_rgb(key)
-        return hex_rgb(self.c[key])
+    # ------------------------------------------------------------ کمکی‌ها ---
 
     def log(self, message: str) -> None:
         stamp = f"{tehran_now():%H:%M:%S}"
-        for line in str(message).splitlines() or [""]:
-            self.log_lines.append(f"{stamp}  {line}")
-        del self.log_lines[:-500]
+        with self.lock:
+            for line in (str(message).splitlines() or [""]):
+                self.log_lines.append(f"{stamp}  {line}" if line else stamp)
+            del self.log_lines[:-500]
 
-    def post(self, fn) -> None:
-        """اجرای کار در ترد رابط کاربری."""
-        self.events.put(fn)
+    def emit(self, event_type: str, **data) -> None:
+        """یک رویداد برای رابط کاربری (صدا، پیام، مشغول/آزاد)."""
+        with self.lock:
+            self.events.append({"type": event_type, **data})
+            del self.events[:-60]
 
-    def toast_msg(self, text: str, kind: str = "ok") -> None:
-        self.toast = {"text": text, "kind": kind, "until": time.monotonic() + 3.5}
+    def sound(self, name: str) -> None:
+        self.emit("sound", name=name)
+
+    def toast(self, text: str, kind: str = "ok") -> None:
+        self.emit("toast", text=text, kind=kind)
 
     def report_error(self, context: str, detail: str = "") -> None:
         path = write_error(context, detail)
         self.log(f"🗂 خطا ذخیره شد: {path.name}" if path else "⚠️ ذخیره خطا ممکن نشد.")
-        if path:
-            self.toast_msg("خطا در logs/errors ذخیره شد", "error")
-        else:
-            self.toast_msg("خطا ثبت شد", "error")
-
-    def hit(self, rect, callback) -> None:
-        self.hits.append((pygame.Rect(rect), callback))
-
-    def hover(self, rect) -> bool:
-        return pygame.Rect(rect).collidepoint(self.mouse)
-
-    # ------------------------------------------------------- متن‌نویسی ---
-
-    def text(self, value, pos, size=13, color=None, bold=False, align="right", valign="top"):
-        color = self.c_(color) if isinstance(color, str) else (color or self.c_("text"))
-        surf = self.fonts.render(str(value), size, color, bold)
-        rect = surf.get_rect()
-        x, y = pos
-        if align == "right":
-            rect.topright = (x, y)
-        elif align == "center":
-            rect.midtop = (x, y)
-        else:
-            rect.topleft = (x, y)
-        if valign == "center":
-            rect.y = y - rect.h // 2
-        elif valign == "bottom":
-            rect.bottom = y
-        self.screen.blit(surf, rect)
-        return rect
-
-    def paragraph(self, value, rect, size=11, color=None, bold=False, gap=6) -> int:
-        """متن چندخطی راست‌چین؛ ارتفاع مصرف‌شده را برمی‌گرداند."""
-        lines: list[str] = []
-        for raw in str(value).split("\n"):
-            if not raw.strip():
-                lines.append("")
-            else:
-                lines.extend(self.fonts.wrap(raw, size, rect.width, bold))
-        y = rect.top
-        for line in lines:
-            if line:
-                self.text(line, (rect.right, y), size, color, bold, align="right")
-            y += self.fonts.get(size, bold).get_height() + gap - 4
-        return y - rect.top
-
-    def ellipsis(self, value: str, size: int, max_width: int, bold: bool = False) -> str:
-        if self.fonts.width(value, size, bold) <= max_width:
-            return value
-        cut = value
-        while cut and self.fonts.width(cut + "…", size, bold) > max_width:
-            cut = cut[:-1]
-        return cut + "…"
-
-    # ------------------------------------------------------------ ویجت‌ها ---
-
-    def card(self, rect, radius=16, fill=None, border=True, elevate=True) -> pygame.Rect:
-        rect = pygame.Rect(rect)
-        if elevate:
-            shadow(self.screen, rect, radius, spread=12, alpha=42 if self.theme_name == "dark" else 26)
-        rounded(self.screen, rect, radius, hex_rgb(fill or self.c["surface"]))
-        if border:
-            rounded(self.screen, rect, radius, self.c_("border"), width=1)
-        return rect
-
-    def button(
-        self,
-        rect,
-        label,
-        on_click,
-        *,
-        kind="secondary",
-        icon=None,
-        size=13,
-        bold=True,
-        enabled=True,
-        radius=12,
-        sub=None,
-    ):
-        rect = pygame.Rect(rect)
-        hovered = enabled and self.hover(rect)
-
-        if kind == "primary":
-            base = self.c_("accent")
-            bg = lighten(base, 0.08) if hovered else base
-            fg = self.c_("bg") if self.theme_name == "dark" else (255, 255, 255)
-            bd = None
-        elif kind == "danger":
-            bg = self.c_("danger_soft") if hovered else self.c_("surface2")
-            fg = self.c_("danger")
-            bd = self.c_("danger")
-        elif kind == "ghost":
-            bg = self.c_("surface2") if hovered else None
-            fg = self.c_("text") if hovered else self.c_("text_dim")
-            bd = None
-        else:  # secondary
-            bg = self.c_("surface2") if not hovered else lighten(self.c_("surface2"), 0.07)
-            fg = self.c_("text")
-            bd = self.c_("border_strong")
-
-        if not enabled:
-            bg = self.c_("surface2")
-            fg = self.c_("text_dim")
-
-        if bg is not None:
-            rounded(self.screen, rect, radius, bg)
-        if bd is not None:
-            rounded(self.screen, rect, radius, bd, width=1)
-
-        icon_w = 0
-        if icon:
-            icon_w = self.icon(icon, rect.x + 16, rect.centery, 11, fg, align="left")
-        label_room = rect.width - 28 - icon_w
-        shown = self.ellipsis(label, size, label_room, bold)
-        if kind == "primary":
-            sub_color = mix(self.c["accent"], "#ffffff", 0.62 if self.theme_name == "dark" else 0.75)
-        else:
-            sub_color = self.c_("text_dim")
-        if sub:
-            self.text(shown, (rect.right - 16, rect.centery - 10), size, fg, bold, align="right")
-            self.text(
-                self.ellipsis(sub, 10, label_room, False),
-                (rect.right - 16, rect.centery + 7),
-                10, sub_color, align="right",
-            )
-        else:
-            self.text(shown, (rect.right - 16, rect.centery), size, fg, bold, align="right", valign="center")
-
-        if enabled and on_click:
-            self.hit(rect, lambda: (self.sounds.play("click"), on_click()))
-        return rect
-
-    def icon(self, name, x, y, size, color, align="left") -> int:
-        """آیکون‌های برداری ساده."""
-        col = hex_rgb(color) if isinstance(color, str) else color
-        if align == "right":
-            x -= size
-        if name == "camera":
-            body = pygame.Rect(x, y - size * 0.6, size * 2, size * 1.25)
-            rounded(self.screen, body, 3, col, width=max(1, size // 6))
-            pygame.draw.rect(self.screen, col, (x + size * 0.55, y - size * 0.95, size * 0.6, size * 0.4))
-            pygame.draw.circle(self.screen, col, (int(x + size), int(y)), int(size * 0.42), max(1, size // 6))
-            return int(size * 2)
-        if name == "list":
-            for i in range(3):
-                top = y - size * 0.7 + i * size * 0.7
-                pygame.draw.circle(self.screen, col, (int(x + size * 0.25), int(top + size * 0.22)), 2)
-                pygame.draw.line(
-                    self.screen, col, (x + size * 0.6, top + size * 0.22),
-                    (x + size * 1.9, top + size * 0.22), max(1, size // 7),
-                )
-            return int(size * 2)
-        if name == "play":
-            pygame.draw.polygon(
-                self.screen, col,
-                [(x, y - size * 0.75), (x, y + size * 0.75), (x + size * 1.3, y)],
-            )
-            return int(size * 1.3)
-        if name == "download":
-            pygame.draw.line(self.screen, col, (x + size * 0.6, y - size * 0.8), (x + size * 0.6, y + size * 0.4), max(2, size // 5))
-            pygame.draw.polygon(
-                self.screen, col,
-                [
-                    (x + size * 0.15, y + size * 0.15),
-                    (x + size * 1.05, y + size * 0.15),
-                    (x + size * 0.6, y + size * 0.85),
-                ],
-            )
-            pygame.draw.line(self.screen, col, (x, y + size * 1.1), (x + size * 1.2, y + size * 1.1), max(2, size // 5))
-            return int(size * 1.3)
-        if name == "refresh":
-            pygame.draw.circle(self.screen, col, (int(x + size * 0.7), int(y)), int(size * 0.7), max(2, size // 5))
-            pygame.draw.polygon(
-                self.screen, col,
-                [
-                    (x + size * 0.85, y - size * 0.95),
-                    (x + size * 1.55, y - size * 0.55),
-                    (x + size * 0.85, y - size * 0.15),
-                ],
-            )
-            return int(size * 1.6)
-        if name == "sound":
-            pygame.draw.polygon(
-                self.screen, col,
-                [(x, y - size * 0.35), (x + size * 0.35, y - size * 0.35),
-                 (x + size * 0.85, y - size * 0.8), (x + size * 0.85, y + size * 0.8),
-                 (x + size * 0.35, y + size * 0.35), (x, y + size * 0.35)],
-            )
-            return int(size * 0.9)
-        if name == "mute":
-            pygame.draw.polygon(
-                self.screen, col,
-                [(x, y - size * 0.35), (x + size * 0.35, y - size * 0.35),
-                 (x + size * 0.85, y - size * 0.8), (x + size * 0.85, y + size * 0.8),
-                 (x + size * 0.35, y + size * 0.35), (x, y + size * 0.35)],
-            )
-            pygame.draw.line(self.screen, col, (x + size * 1.1, y - size * 0.4), (x + size * 1.7, y + size * 0.4), 2)
-            pygame.draw.line(self.screen, col, (x + size * 1.7, y - size * 0.4), (x + size * 1.1, y + size * 0.4), 2)
-            return int(size * 1.8)
-        if name == "sun":
-            pygame.draw.circle(self.screen, col, (int(x + size * 0.6), int(y)), int(size * 0.42))
-            for i in range(8):
-                a = math.radians(i * 45)
-                p0 = (x + size * 0.6 + math.cos(a) * size * 0.62, y + math.sin(a) * size * 0.62)
-                p1 = (x + size * 0.6 + math.cos(a) * size * 0.85, y + math.sin(a) * size * 0.85)
-                pygame.draw.line(self.screen, col, p0, p1, 2)
-            return int(size * 1.5)
-        if name == "moon":
-            pygame.draw.circle(self.screen, col, (int(x + size * 0.65), int(y)), int(size * 0.62), 2)
-            pygame.draw.circle(self.screen, self.c_("surface"), (int(x + size * 0.95), int(y - size * 0.2)), int(size * 0.55))
-            return int(size * 1.5)
-        if name == "check":
-            pygame.draw.lines(
-                self.screen, col, False,
-                [(x, y), (x + size * 0.4, y + size * 0.45), (x + size * 1.1, y - size * 0.5)],
-                max(2, size // 4),
-            )
-            return int(size * 1.2)
-        if name == "x":
-            pygame.draw.line(self.screen, col, (x, y - size * 0.5), (x + size, y + size * 0.5), 2)
-            pygame.draw.line(self.screen, col, (x + size, y - size * 0.5), (x, y + size * 0.5), 2)
-            return int(size)
-        return 0
-
-    def chip(self, x, y, label, active=False, color=None, size=11) -> int:
-        """چیپ گرد؛ y مرکز عمودی چیپ است."""
-        text_w = self.fonts.width(label, size, True)
-        w = text_w + 26
-        h = self.fonts.get(size, True).get_height() + 12
-        rect = pygame.Rect(0, 0, w, h)
-        rect.midleft = (x, y)
-        col = self.c_(color) if color else self.c_("accent")
-        bg = mix(self.c["surface2"], col, 0.22) if active else self.c_("surface2")
-        bd = mix(self.c["border_strong"], col, 0.55) if active else self.c_("border")
-        rounded(self.screen, rect, h // 2, bg)
-        rounded(self.screen, rect, h // 2, bd, width=1)
-        self.text(
-            label, (rect.centerx, rect.centery), size,
-            col if active else self.c_("text_dim"), True, align="center", valign="center",
-        )
-        return w
-
-    def status_dot(self, x, y, kind: str, label: str, note: str) -> None:
-        """چراغ وضعیت با برچسب."""
-        colors = {
-            "ok": self.c_("ok"),
-            "bad": self.c_("danger"),
-            "wait": self.c_("border_strong"),
-        }
-        col = colors.get(kind, self.c_("border_strong"))
-        pygame.draw.circle(self.screen, mix(self.c["surface"], col, 0.35), (x, y), 7)
-        pygame.draw.circle(self.screen, col, (x, y), 4)
-        self.text(label, (x + 12, y), 10, self.c_("text_dim"), True, align="left", valign="center")
-        w = self.fonts.width(label, 10, True)
-        self.text(note, (x + 16 + w, y), 9, col if kind != "wait" else self.c_("text_dim"), align="left", valign="center")
-
-    # ------------------------------------------------------------ هدر و تب‌ها ---
-
-    def draw_header(self, w: int) -> None:
-        c = self.c
-        rect = pygame.Rect(0, 0, w, HEADER_H)
-        pygame.draw.rect(self.screen, self.c_("surface"), rect)
-        pygame.draw.line(self.screen, self.c_("border"), (0, HEADER_H - 1), (w, HEADER_H - 1))
-
-        # --- سمت راست: لوگو، نام فارسی و نشان «پنل ویندوز» ---
-        logo = pygame.Rect(w - PAD - 60, 16, 60, 60)
-        grad = gradient_rect((60, 60), self.c["accent"], self.c["accent_strong"])
-        mask = pygame.Surface((60, 60), pygame.SRCALPHA)
-        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=19)
-        grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-        self.screen.blit(grad, logo)
-        self.text(
-            "WA", (logo.centerx, logo.top + 14), 15,
-            "#ffffff" if self.theme_name == "light" else self.c_("bg"),
-            True, align="center",
-        )
-
-        brand_right = logo.left - 16
-        self.text("ایجنت ویندوز", (brand_right, 8), 17, self.c_("text"), True, align="right")
-
-        # نشان «پنل ویندوز»
-        badge_text = "پنل ویندوز"
-        badge_w = self.fonts.width(badge_text, 9, True) + 26
-        badge = pygame.Rect(0, 0, badge_w, 24)
-        badge.topright = (brand_right, 44)
-        rounded(self.screen, badge, 12, mix(self.c["surface"], self.c["accent"], 0.18))
-        rounded(self.screen, badge, 12, mix(self.c["border_strong"], self.c["accent"], 0.55), width=1)
-        pygame.draw.circle(self.screen, self.c_("accent"), (badge.left + 11, badge.centery), 3)
-        self.text(badge_text, (badge.right - 9, badge.centery - 7), 9, self.c_("accent"), True, align="right")
-
-        # نسخه و شناسه، پایین‌تر و با فاصله
-        self.text(
-            f"نسخه {to_fa(APP_VERSION)}  ·  شناسه {build_info()['commit']}",
-            (brand_right, 74), 9, self.c_("text_dim"), align="right",
-        )
-
-        # --- سمت چپ: ساعت و تاریخ ---
-        now = tehran_now()
-        jy, jm, jd = jalali_parts(now)
-        clock_x = PAD + 108
-        self.text(f"{to_fa(f'{now:%H:%M:%S}')}", (clock_x, 16), 24, self.c_("text"), True, align="left")
-        self.text(
-            f"{to_fa(str(jd))} {FA_MONTHS[jm - 1]} {to_fa(str(jy))}",
-            (clock_x, 56), 11, self.c_("text_dim"), align="left",
-        )
-
-        # --- دکمه‌های گوشه‌ی چپ (بالا-چپ) ---
-        mute_icon = "mute" if self.sounds.muted else "sound"
-        self.icon_button(
-            pygame.Rect(PAD, 22, 42, 42), mute_icon, self.action_toggle_sound,
-            active=self.sounds.muted,
-        )
-        theme_icon = "sun" if self.theme_name == "dark" else "moon"
-        self.icon_button(
-            pygame.Rect(PAD + 50, 22, 42, 42), theme_icon, self.action_toggle_theme
-        )
-
-    def icon_button(self, rect, icon, on_click, *, active=False) -> None:
-        rect = pygame.Rect(rect)
-        hovered = self.hover(rect)
-        bg = self.c_("surface2") if not hovered else lighten(self.c_("surface2"), 0.09)
-        rounded(self.screen, rect, 10, bg)
-        rounded(self.screen, rect, 10, self.c_("border_strong"), width=1)
-        col = self.c_("accent") if active else (self.c_("text") if hovered else self.c_("text_dim"))
-        self.icon(icon, rect.centerx - 8, rect.centery, 9, col)
-        self.hit(rect, lambda: (self.sounds.play("click"), on_click()))
-
-    def draw_tabs(self, w: int) -> None:
-        bar = pygame.Rect(0, HEADER_H, w, TABS_H)
-        pygame.draw.rect(self.screen, self.c_("bg"), bar)
-
-        self.tab_rects: dict[str, pygame.Rect] = {}
-        pills_w = min(940, w - 2 * PAD)
-        gap = 5
-        row_h = 42
-        row_gap = 8
-        top = HEADER_H + 9
-
-        for row_index, row in enumerate(TAB_ROWS):
-            pills = pygame.Rect(w - PAD - pills_w, top + row_index * (row_h + row_gap), pills_w, row_h)
-            rounded(self.screen, pills, row_h // 2, self.c_("surface2"))
-            rounded(self.screen, pills, row_h // 2, self.c_("border"), width=1)
-
-            each = (pills.width - 12 - gap * (len(row) - 1)) // len(row)
-            x = pills.right - 6 - each
-            for key, label in row:
-                rect = pygame.Rect(x, pills.top + 5, each, pills.height - 10)
-                active = key == self.tab
-                hovered = self.hover(rect) and not active
-                if active:
-                    rounded(self.screen, rect, 16, self.c_("accent"))
-                elif hovered:
-                    rounded(self.screen, rect, 16, lighten(self.c_("surface2"), 0.06))
-                fg = (
-                    self.c_("bg") if self.theme_name == "dark" else (255, 255, 255)
-                ) if active else (self.c_("text") if hovered else self.c_("text_dim"))
-                self.text(label, (rect.centerx, rect.centery), 13, fg, True, align="center", valign="center")
-                self.tab_rects[key] = rect
-                self.hit(rect, lambda k=key: self.switch_tab(k))
-                x -= each + gap
-
-        # شمارنده کدهای اجرانشده داخل تب «کتابخانه کدها»
-        pending = sum(1 for item in self.codes_index if not item["ran"])
-        if pending and "codes" in self.tab_rects:
-            tab_rect = self.tab_rects["codes"]
-            badge = pygame.Rect(0, 0, 24, 19)
-            badge.midright = (tab_rect.right - 6, tab_rect.centery)
-            rounded(self.screen, badge, 9, self.c_("warn"))
-            self.text(
-                to_fa(str(pending)), (badge.centerx, badge.centery - 8), 9,
-                self.c_("bg"), True, align="center",
-            )
-
-    def draw_footer(self, w: int, h: int) -> None:
-        rect = pygame.Rect(0, h - FOOTER_H, w, FOOTER_H)
-        pygame.draw.rect(self.screen, self.c_("surface"), rect)
-        pygame.draw.line(self.screen, self.c_("border"), (0, rect.top), (w, rect.top))
-
-        y = rect.centery
-        x = PAD + 8
-        for key, label in (
-            ("internet", "اینترنت"),
-            ("drive", "گوگل درایو"),
-            ("repo", "مخزن مادر"),
-            ("collab", "مخزن همکار"),
-        ):
-            state = self.status.get(key)
-            kind = "wait" if state is None else ("ok" if state else "bad")
-            self.status_dot(x, y, kind, label, self.status_note.get(key, ""))
-            x += 22 + self.fonts.width(label, 10, True) + 8 + self.fonts.width(self.status_note.get(key, ""), 9) + 26
-
-        status_text = (self.busy or ("حالت خودکار" if self.settings.get("auto") else "حالت دستی"))
-        self.text(status_text, (w - PAD, y), 10, self.c_("text_dim"), True, align="right", valign="center")
-
-    # ---------------------------------------------------------- قاب محتوا ---
-
-    def begin_content(self, w: int, h: int) -> int:
-        """آماده‌سازی ناحیه اسکرول‌شونده؛ بالای محتوا را برمی‌گرداند."""
-        self.view_rect = pygame.Rect(
-            PAD, HEADER_H + TABS_H, w - 2 * PAD, h - HEADER_H - TABS_H - FOOTER_H
-        )
-        self.screen.set_clip(self.view_rect)
-        offset = self.scroll[self.tab]
-        return int(self.view_rect.top + 4 - offset)
-
-    def end_content(self, content_height: int) -> None:
-        self.screen.set_clip(None)
-        visible = self.view_rect.height - 8
-        max_scroll = max(0, content_height - visible)
-        self.scroll[self.tab] = max(0.0, min(self.scroll[self.tab], max_scroll))
-        self.scroll_target[self.tab] = self.scroll[self.tab]
-
-        # نوار اسکرول باریک
-        if max_scroll > 0:
-            track = pygame.Rect(self.view_rect.right - 3, self.view_rect.top + 4, 4, visible)
-            rounded(self.screen, track, 2, self.c_("surface2"))
-            frac = visible / (content_height or 1)
-            h_thumb = max(30, int(visible * frac))
-            pos = self.scroll[self.tab] / max_scroll if max_scroll else 0
-            thumb = pygame.Rect(track.x, int(track.top + (track.height - h_thumb) * pos), 4, h_thumb)
-            rounded(self.screen, thumb, 2, self.c_("border_strong"))
-
-    # -------------------------------------------------------------- تب‌ها ---
-
-    def draw(self) -> None:
-        w, h = self.screen.get_size()
-        self.hits = []
-        self.screen.fill(self.c_("bg"))
-
-        self.draw_header(w)
-        self.draw_tabs(w)
-
-        top = self.begin_content(w, h)
-        height = getattr(self, f"draw_{self.tab}")(self.view_rect, top)
-        self.end_content(height)
-
-        self.draw_footer(w, h)
-        if self.toast:
-            self.draw_toast(w)
-        if self.modal:
-            self.draw_modal(w, h)
-
-    # -------------------------------------------------------- تب «عملیات» ---
-
-    def draw_main(self, view, top) -> int:
-        """تب «مغز ایجنت» — مرکز کنترل."""
-        w = view.width
-        y = top
-
-        # --- کارت حالت اجرا ---
-        card = pygame.Rect(view.left, y, w, 124)
-        self.card(card)
-        self.text("حالت اجرا", (card.right - 22, card.top + 16), 11, self.c_("text_dim"), True)
-        self.text(
-            "خودکار" if self.settings.get("auto") else "دستی",
-            (card.right - 22, card.top + 44), 20,
-            self.c_("accent") if self.settings.get("auto") else self.c_("text"), True,
-        )
-        hint = (
-            "هر ۱۰ ثانیه مخزن همکار بررسی می‌شود؛ کد تازه خودکار دانلود و اجرا می‌شود."
-            if self.settings.get("auto")
-            else "هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود؛ برای هر مرحله تأیید می‌گیرد."
-        )
-        self.text(
-            self.ellipsis(hint, 10, card.width - 470),
-            (card.right - 22, card.bottom - 34), 10, self.c_("text_dim"),
-        )
-        self.switch(
-            pygame.Rect(card.right - 360, card.centery - 19, 76, 38),
-            self.settings.get("auto"),
-            self.action_toggle_auto,
-        )
-
-        # تایمر دایره‌ای
-        center = (card.left + 64, card.centery)
-        if self.settings.get("auto"):
-            remaining = max(0.0, self.auto_next - time.monotonic())
-            progress = 1 - remaining / max(1, SYNC_POLL_SECONDS)
-            draw_ring(
-                self.screen, center, 34, progress,
-                self.c_("accent") if remaining > 3 else self.c_("warn"),
-                self.c_("surface2"), width=6,
-            )
-            if self.busy:
-                draw_spinner(self.screen, center, 16, self._spinner, self.c_("accent"))
-            else:
-                self.text(
-                    to_fa(str(int(math.ceil(remaining)))),
-                    (center[0], center[1] - 12), 17, self.c_("text"), True, align="center",
-                )
-                self.text("ثانیه", (center[0], center[1] + 14), 9, self.c_("text_dim"), align="center")
-        else:
-            draw_ring(self.screen, center, 34, 0, self.c_("border"), self.c_("surface2"), width=6)
-            self.text("دستی", (center[0], center[1] - 9), 10, self.c_("text_dim"), True, align="center")
-        y += card.height + 14
-
-        # --- کارت وضعیت کدها ---
-        pending = sum(1 for item in self.codes_index if not item["ran"])
-        total = len(self.codes_index)
-        done = total - pending
-        card = pygame.Rect(view.left, y, w, 116)
-        self.card(card)
-        self.text("کدهای ایجنت همکار", (card.right - 22, card.top + 16), 11, self.c_("text_dim"), True)
-
-        stats = [
-            ("کل کدها", to_fa(str(total)), "text"),
-            ("اجرا شده", to_fa(str(done)), "ok"),
-            ("در انتظار", to_fa(str(pending)), "warn"),
-        ]
-        sx = card.right - 22
-        for label, value, color in stats:
-            box = pygame.Rect(0, 0, 120, 56)
-            box.topright = (sx, card.top + 40)
-            rounded(self.screen, box, 12, self.c_("surface2"))
-            self.text(value, (box.centerx, box.top + 8), 17, self.c_(color), True, align="center")
-            self.text(label, (box.centerx, box.top + 34), 9, self.c_("text_dim"), align="center")
-            sx -= 132
-
-        self.button(
-            pygame.Rect(card.left + 22, card.top + 24, 200, 46),
-            "بررسی مخزن همکار", self.action_check_collab,
-            kind="primary", icon="download", size=11,
-        )
-        self.text(
-            self.busy or ("آخرین بررسی: " + to_fa(str(len(self.log_lines))) + " رویداد ثبت شده"),
-            (card.left + 240, card.top + 40), 9, self.c_("text_dim"), align="left",
-        )
-        y += card.height + 14
-
-        # --- کارت خلاصه‌ی سیستم ---
-        card = pygame.Rect(view.left, y, w, 176)
-        self.card(card)
-        self.text("وضعیت سیستم", (card.right - 22, card.top + 16), 11, self.c_("text_dim"), True)
-        rows = [
-            ("پوشه کدها", str(get_desktop_dir() / CODES_FOLDER_NAME)),
-            ("خروجی‌ها", str(resolve_report_dir()[0])),
-            ("حالت نمایش", "تاریک" if self.theme_name == "dark" else "روشن"),
-            ("فونت", "وزیرمتن" if (LOCAL_BASE_DIR / "assets/fonts/Vazirmatn-Regular.ttf").is_file() else "سیستمی"),
-        ]
-        yy = card.top + 44
-        for label, value in rows:
-            self.text(label, (card.right - 22, yy), 9, self.c_("text_dim"), True, align="right")
-            self.text(
-                self.ellipsis(value, 9, card.width - 190),
-                (card.left + 22, yy), 9, self.c_("text"), align="left",
-            )
-            yy += 30
-        return y + card.height + 12
-
-    def draw_log(self, rect) -> None:
-        inner = rect.inflate(-16, -12)
-        rounded(self.screen, rect, 12, self.c_("surface2"))
-        rounded(self.screen, rect, 12, self.c_("border"), width=1)
-
-        size = 10
-        stamp_size = 9
-        line_h = self.fonts.get(size).get_height() + 3
-        gutter = self.fonts.width("۰۰:۰۰:۰۰", stamp_size) + 14
-        text_width = inner.width - gutter
-
-        rows: list[tuple[str, str, tuple]] = []
-        for line in self.log_lines[-140:]:
-            color = self.c_("text")
-            if "❌" in line or "خطا" in line or "⚠️" in line:
-                color = self.c_("danger")
-            elif "✅" in line or "📥" in line or "🎉" in line:
-                color = self.c_("ok")
-            elif "▶️" in line:
-                color = self.c_("accent")
-            stamp, _, body = line.partition("  ")
-            if not body:
-                stamp, body = "", line
-            pieces = self.fonts.wrap(body.strip() or " ", size, text_width)
-            for index, piece in enumerate(pieces):
-                rows.append((stamp if index == 0 else "", piece, color))
-
-        room = max(1, inner.height // line_h)
-        start = max(0, len(rows) - room)
-        self.screen.set_clip(rect.inflate(0, -6))
-        yy = inner.top
-        for stamp, piece, color in rows[start:]:
-            if stamp:
-                self.text(stamp, (inner.left, yy), stamp_size, self.c_("text_dim"), align="left")
-            self.text(piece, (inner.right, yy), size, color, align="right")
-            yy += line_h
-
-    # -------------------------------------------------- تب «ایجنت مادر» ---
-
-    def draw_mother(self, view, top) -> int:
-        """محل ایجنت مادر — فعلاً خالی، آماده برای ساخت بعدی."""
-        y = top
-        card = pygame.Rect(view.left, y, view.width, 210)
-        self.card(card)
-        self.text("ایجنت مادر", (card.right - 24, card.top + 20), 15, self.c_("text"), True)
-        self.text(
-            "این بخش در نسخه‌های بعدی ساخته می‌شود.",
-            (card.right - 24, card.top + 54), 11, self.c_("text_dim"),
-        )
-        box = pygame.Rect(card.left + 24, card.top + 92, card.width - 48, 92)
-        rounded(self.screen, box, 12, self.c_("surface2"))
-        rounded(self.screen, box, 12, self.c_("border"), width=1)
-        for i, line in enumerate(
-            (
-                "اینجا جای ایجنت مادر است: همان ایجنتی که این برنامه را می‌نویسد و نسخه می‌دهد.",
-                "برنامه فعلاً هیچ نسخه‌ای را خودکار از گیت‌هاب نمی‌گیرد — به‌روزرسانی دستی است.",
-            )
-        ):
-            self.text(
-                self.ellipsis(line, 10, box.width - 32),
-                (box.right - 16, box.top + 20 + i * 30), 10, self.c_("text_dim"),
-            )
-        return card.bottom + 12
-
-    # ------------------------------------------------ تب «ایجنت مدیریت» ---
-
-    def draw_manage(self, view, top) -> int:
-        """جای ایجنت مدیریت (وب) — قالب + اطلاعات دو مخزن."""
-        y = top
-
-        card = pygame.Rect(view.left, y, view.width, 140)
-        self.card(card)
-        self.text("ایجنت مدیریت", (card.right - 24, card.top + 18), 15, self.c_("text"), True)
-        self.text(
-            "یک سایت مدیریتی بیرونی که کدهای ایجنت همکار را می‌خواند، دوباره اجرا می‌کند و به همکار پرامپت می‌دهد.",
-            (card.right - 24, card.top + 52), 10, self.c_("text_dim"),
-        )
-
-        chips = [
-            ("مرور کدهای ریپوی همکار", "accent"),
-            ("اجرای دوباره کد", "ok"),
-            ("ارسال پرامپت به ایجنت همکار", "warn"),
-            ("خواندن گزارش و خطاها", "due"),
-        ]
-        cx = card.right - 24
-        cy = card.top + 88
-        for label, color in chips:
-            w = self.fonts.width(label, 9, True) + 26
-            if cx - w < card.left + 24:
-                cx = card.right - 24
-                cy += 36
-            rect = pygame.Rect(cx - w, cy, w, 30)
-            tone = self.c_(color)
-            rounded(self.screen, rect, 15, mix(self.c["surface2"], tone, 0.16))
-            rounded(self.screen, rect, 15, mix(self.c["border_strong"], tone, 0.5), width=1)
-            self.text(label, (rect.centerx, rect.centery), 9, tone, True, align="center", valign="center")
-            cx -= w + 8
-        y += card.height + 14
-
-        # --- دو مخزنی که ایجنت مدیریت می‌خواند ---
-        card = pygame.Rect(view.left, y, view.width, 176)
-        self.card(card)
-        self.text("مخزن‌هایی که در اختیار دارد", (card.right - 24, card.top + 16), 11, self.c_("text_dim"), True)
-
-        m_owner, m_repo, m_branch = self.mother_info()
-        c_owner, c_repo, c_branch = self.collab_info()
-        rows = [
-            ("ایجنت مادر (فقط خواندن)", f"{m_owner}/{m_repo}", m_branch, "due"),
-            ("ایجنت همکار (خواندن و نوشتن)", f"{c_owner}/{c_repo}", c_branch, "accent"),
-        ]
-        yy = card.top + 48
-        for title, repo_name, branch, color in rows:
-            tone = self.c_(color)
-            pygame.draw.circle(self.screen, tone, (card.right - 32, yy + 8), 4)
-            self.text(title, (card.right - 46, yy), 10, self.c_("text"), True)
-            self.text(
-                self.ellipsis(f"{repo_name}  ·  {branch}", 9, card.width - 300),
-                (card.left + 24, yy + 2), 9, self.c_("text_dim"), align="left",
-            )
-            yy += 38
-
-        self.text(
-            "برای ساختن این سایت، فایل docs/manager-agent-prompt.md را به ایجنت مدیریت بده.",
-            (card.right - 24, card.bottom - 34), 9, self.c_("warn"),
-        )
-        y += card.height + 14
-
-        # --- قالب فعلی ---
-        card = pygame.Rect(view.left, y, view.width, 92)
-        self.card(card)
-        self.text(
-            "این تب فعلاً فقط قالب است؛ خود سایت مدیریت جدا از این برنامه ساخته می‌شود.",
-            (card.right - 24, card.top + 22), 10, self.c_("text_dim"),
-        )
-        self.text(
-            "رابط مشترک: خواندن کدها از مخزن همکار، اجرای دوباره یک کد، ارسال پرامپت، خواندن logs درایو.",
-            (card.right - 24, card.top + 52), 10, self.c_("text_dim"),
-        )
-        return card.bottom + 12
-
-    # -------------------------------------------------- تب «ایجنت همکار» ---
-
-    def draw_collab(self, view, top) -> int:
-        y = top
-        y = self.draw_repo_card(view, y, "collab", "مخزن ایجنت همکار", "فایل‌های پایتون این مخزن در CODES ذخیره و اجرا می‌شوند.")
-
-        card = pygame.Rect(view.left, y, view.width, 92)
-        self.card(card)
-        self.button(
-            pygame.Rect(card.right - 20 - 210, card.top + 22, 210, 48),
-            "بررسی مخزن همکار", self.action_check_collab,
-            kind="primary", icon="download", size=11,
-        )
-        self.button(
-            pygame.Rect(card.right - 20 - 210 - 12 - 200, card.top + 22, 200, 48),
-            "اجرای کدهای جدید", self.action_run_new,
-            icon="play", size=11,
-        )
-        info = self.busy or f"حالت {'خودکار' if self.settings.get('auto') else 'دستی'}"
-        self.text(info, (card.left + 20, card.top + 26), 10, self.c_("text_dim"), align="left")
-        pending = sum(1 for item in self.codes_index if not item["ran"])
-        self.text(
-            f"{to_fa(str(pending))} کد اجرانشده",
-            (card.left + 20, card.top + 50), 10,
-            self.c_("warn") if pending else self.c_("text_dim"), align="left",
-        )
-        y += card.height + 12
-
-        card = pygame.Rect(view.left, y, view.width, 214)
-        self.card(card)
-        self.text("چطور کار می‌کند", (card.right - 20, card.top + 16), 12, self.c_("text"), True)
-        steps = [
-            "۱) ایجنت همکار فایل .py را در مخزن خودش می‌گذارد.",
-            "۲) دکمه «بررسی مخزن همکار» فایل‌ها را در پوشه CODES روی دسکتاپ می‌گذارد.",
-            "۳) دکمه «اجرای کدهای جدید» آن‌ها را اجرا و نتیجه را در logs گوگل درایو می‌نویسد.",
-            "۴) هر کدی که قبلاً اجرا شده، در تب «کتابخانه کدها» با دکمه پخش دوباره قابل اجراست.",
-        ]
-        yy = card.top + 48
-        for step in steps:
-            self.text(self.ellipsis(step, 10, card.width - 60), (card.right - 20, yy), 10, self.c_("text_dim"))
-            yy += 30
-        return y + card.height + 10
-
-    def draw_repo_card(self, view, y: int, prefix: str, title: str, hint: str) -> int:
-        card = pygame.Rect(view.left, y, view.width, 190)
-        self.card(card)
-
-        self.text(title, (card.right - 20, card.top + 16), 12, self.c_("text"), True)
-        self.text(
-            self.ellipsis(hint, 10, card.width - 60),
-            (card.right - 20, card.top + 44), 10, self.c_("text_dim"),
-        )
-
-        # ردیف فیلدها (از راست به چپ)
-        labels = (("branch", "شاخه", 300), ("repo", "مخزن", 220), ("owner", "مالک", 220))
-        x = card.right - 20
-        for key, label, width in labels:
-            field = pygame.Rect(x - width, card.top + 92, width, 40)
-            self.text(label, (field.right, card.top + 72), 9, self.c_("text_dim"))
-            self.input_field(field, f"{prefix}_{key}")
-            x -= width + 12
-
-        self.button(
-            pygame.Rect(card.right - 20 - 120, card.bottom - 54, 120, 38),
-            "ذخیره", lambda p=prefix: self.action_save_repo(p), size=11,
-        )
-        current = f"{self.settings.get(prefix + '_owner', '')}/{self.settings.get(prefix + '_repo', '')}"
-        self.text(
-            self.ellipsis("فعلی: " + current, 9, card.width - 200),
-            (card.left + 20, card.bottom - 42), 9, self.c_("text_dim"), align="left",
-        )
-        return y + card.height + 14
-
-    # -------------------------------------------------- تب «کتابخانه کدها» ---
-
-    def draw_codes(self, view, top) -> int:
-        y = top
-        card = pygame.Rect(view.left, y, view.width, 92)
-        self.card(card)
-        self.text("کتابخانه کدها", (card.right - 20, card.top + 16), 13, self.c_("text"), True)
-        self.text(
-            self.ellipsis(f"پوشه: {get_desktop_dir() / CODES_FOLDER_NAME}", 9, card.width - 340),
-            (card.right - 20, card.top + 44), 9, self.c_("text_dim"),
-        )
-        self.button(
-            pygame.Rect(card.left + 20, card.top + 24, 165, 44),
-            "به‌روزرسانی", self.action_scan_codes, icon="refresh", size=10,
-        )
-        self.text(
-            to_fa(str(len(self.codes_index))) + " فایل",
-            (card.left + 200, card.top + 34), 10, self.c_("text_dim"), align="left",
-        )
-        y += card.height + 12
-
-        if not self.codes_index:
-            card = pygame.Rect(view.left, y, view.width, 150)
-            self.card(card)
-            self.text("هنوز کدی در پوشه CODES نیست", (card.centerx, card.top + 46), 13, self.c_("text_dim"), True, align="center")
-            self.text(
-                "از تب «ایجنت همکار» دکمه بررسی مخزن را بزنید.",
-                (card.centerx, card.top + 76), 11, self.c_("text_dim"), align="center",
-            )
-            return y + card.height + 10
-
-        for item in self.codes_index:
-            card = pygame.Rect(view.left, y, view.width, 88)
-            hovered = self.hover(card)
-            self.card(card, fill=self.c["surface"] if not hovered else lighten(self.c["surface"], 0.03))
-            accent = self.c_("ok") if item["ok"] else (self.c_("danger") if item["ok"] is False else self.c_("border_strong"))
-            rounded(self.screen, pygame.Rect(card.right - 4, card.top + 14, 4, card.height - 28), 2, accent)
-
-            # دکمه پخش
-            play_rect = pygame.Rect(card.left + 20, card.centery - 22, 44, 44)
-            self.play_button(play_rect, lambda p=item["path"]: self.action_run_single(p))
-
-            self.text(self.ellipsis(item["name"], 12, card.width - 320), (card.right - 22, card.top + 14), 12, self.c_("text"), True)
-            meta = item["meta"]
-            self.text(self.ellipsis(meta, 9, card.width - 320), (card.right - 22, card.top + 44), 9, self.c_("text_dim"))
-            chips_x = card.left + 84
-            for label, color, active in item["chips"]:
-                chips_x += self.chip(chips_x, card.centery, label, active=active, color=color) + 8
-            y += card.height + 10
-        return y + 6
-
-    def play_button(self, rect, on_click) -> None:
-        rect = pygame.Rect(rect)
-        hovered = self.hover(rect)
-        col = self.c_("accent") if not hovered else lighten(self.c_("accent"), 0.12)
-        pygame.draw.circle(self.screen, mix(self.c["surface2"], col, 0.35), rect.center, rect.width // 2)
-        pygame.draw.circle(self.screen, col, rect.center, rect.width // 2, 2)
-        self.icon(
-            "play", rect.centerx - 5, rect.centery, 7,
-            self.c_("bg") if self.theme_name == "dark" else (255, 255, 255),
-        )
-        self.hit(rect, lambda: (self.sounds.play("click"), on_click()))
-
-    # ------------------------------------------------ تب «اسکرین‌شات‌ها» ---
-
-    def _scan_shots(self) -> list[dict]:
-        folder = Path(resolve_screenshot_dir()[0])
-        items: list[dict] = []
-        try:
-            files = sorted(
-                (p for p in folder.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg")),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            files = []
-        for path in files[:80]:
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            items.append(
-                {
-                    "path": path,
-                    "name": path.name,
-                    "size": human_size(stat.st_size),
-                    "when": f"{jalali_date(tehran_now())} {datetime.fromtimestamp(stat.st_mtime):%H:%M}",
-                }
-            )
-        return items
-
-    def thumb(self, path: Path, size=(176, 104)):
-        """بندانگشتی با کش."""
-        if not hasattr(self, "_thumbs"):
-            self._thumbs = {}
-        key = (str(path), path.stat().st_mtime if path.exists() else 0)
-        if key in self._thumbs:
-            return self._thumbs[key]
-        surf = None
-        try:
-            image = pygame.image.load(str(path))
-            surf = pygame.transform.smoothscale(image, size)
-        except Exception:
-            surf = None
-        if len(self._thumbs) > 60:
-            self._thumbs.clear()
-        self._thumbs[key] = surf
-        return surf
-
-    def draw_shots(self, view, top) -> int:
-        y = top
-        folder = Path(resolve_screenshot_dir()[0])
-        shots = self._scan_shots()
-
-        card = pygame.Rect(view.left, y, view.width, 88)
-        self.card(card)
-        self.text("اسکرین‌شات‌ها", (card.right - 22, card.top + 16), 13, self.c_("text"), True)
-        self.text(
-            self.ellipsis(f"پوشه: {folder}", 9, card.width - 380),
-            (card.right - 22, card.top + 44), 9, self.c_("text_dim"),
-        )
-        self.button(
-            pygame.Rect(card.left + 22, card.top + 26, 150, 40),
-            "باز کردن پوشه", lambda: self.open_path(folder), icon="list", size=10,
-        )
-        self.text(
-            to_fa(str(len(shots))) + " تصویر",
-            (card.left + 186, card.top + 36), 10, self.c_("text_dim"), align="left",
-        )
-        y += card.height + 14
-
-        if not shots:
-            card = pygame.Rect(view.left, y, view.width, 140)
-            self.card(card)
-            self.text("هنوز اسکرین‌شاتی ذخیره نشده", (card.centerx, card.top + 52), 12, self.c_("text_dim"), True, align="center")
-            return card.bottom + 12
-
-        for item in shots:
-            card = pygame.Rect(view.left, y, view.width, 128)
-            self.card(card)
-            pic = self.thumb(item["path"])
-            frame = pygame.Rect(card.right - 22 - 176, card.top + 12, 176, 104)
-            rounded(self.screen, frame, 10, self.c_("surface2"))
-            if pic:
-                self.screen.blit(pic, (frame.x, frame.y))
-            else:
-                self.text("بدون پیش‌نمایش", (frame.centerx, frame.centery - 8), 9, self.c_("text_dim"), align="center")
-            rounded(self.screen, frame, 10, self.c_("border"), width=1)
-
-            self.text(
-                self.ellipsis(item["name"], 11, card.width - 420),
-                (card.right - 220, card.top + 18), 11, self.c_("text"), True,
-            )
-            self.text(item["size"], (card.right - 220, card.top + 48), 9, self.c_("text_dim"))
-            self.button(
-                pygame.Rect(card.left + 22, card.centery - 20, 170, 40),
-                "نمایش تصویر", lambda p=item["path"]: self.open_path(p), icon="camera", size=10,
-            )
-            y += card.height + 12
-        return y + 6
-
-    # ------------------------------------------------- تب «گزارش زنده» ---
-
-    def draw_live(self, view, top) -> int:
-        card = pygame.Rect(view.left, top, view.width, max(260, view.height - 24))
-        self.card(card)
-        self.text("گزارش زنده", (card.right - 22, card.top + 16), 13, self.c_("text"), True)
-        self.text(
-            to_fa(str(len(self.log_lines))) + " خط",
-            (card.left + 22, card.top + 18), 10, self.c_("text_dim"), align="left",
-        )
-        self.button(
-            pygame.Rect(card.left + 22, card.top + 44, 130, 36),
-            "پاک کردن", self.action_clear_log, size=10,
-        )
-        self.draw_log(pygame.Rect(card.left + 14, card.top + 90, card.width - 28, card.height - 104))
-        return card.bottom + 10
-
-    # -------------------------------------------------------- تب «تغییرات» ---
-
-    def draw_changes(self, view, top) -> int:
-        lines: list[tuple[str, str, bool]] = []
-        lines.append((f"نسخه در حال اجرا: {APP_VERSION}", "text", True))
-        lines.append((f"ساخته‌شده: {build_info()['date']} — {build_info()['time']} تهران", "text_dim", False))
-        lines.append(("", "text", False))
-        for version, date, items in CHANGELOG:
-            lines.append((f"نسخه {version} — {date}", "accent", True))
-            for entry in items:
-                lines.append((f"• {entry}", "text_dim", False))
-            lines.append(("", "text", False))
-
-        card = pygame.Rect(view.left, top, view.width, 60 + len(lines) * 24)
-        self.card(card)
-        yy = card.top + 18
-        for txt, color, bold in lines:
-            if txt:
-                self.text(self.ellipsis(txt, 11, card.width - 50), (card.right - 20, yy), 11, self.c_(color), bold)
-            yy += 24
-        return card.bottom + 10
-
-    # --------------------------------------------------------- کنترل‌ها ---
-
-    def switch(self, rect, value: bool, on_click) -> None:
-        rect = pygame.Rect(rect)
-        self.switch_pos += ((1.0 if value else 0.0) - self.switch_pos) * 0.28
-        on = self.switch_pos > 0.5
-        track_col = mix(self.c["surface2"], self.c["accent"], self.switch_pos)
-        rounded(self.screen, rect, rect.height // 2, track_col)
-        rounded(self.screen, rect, rect.height // 2, self.c_("accent") if on else self.c_("border_strong"), width=1)
-        pad = 4
-        r = rect.height // 2 - pad
-        cx = int(rect.left + pad + r + (rect.width - 2 * pad - 2 * r) * self.switch_pos)
-        pygame.draw.circle(self.screen, self.c_("surface"), (cx, rect.centery), r)
-        self.hit(rect, lambda: (self.sounds.play("toggle"), on_click()))
-
-    def input_field(self, rect, key: str) -> None:
-        rect = pygame.Rect(rect)
-        if not hasattr(self, "field_values"):
-            self.field_values = {}
-        if key not in self.field_values:
-            self.field_values[key] = str(self.settings.get(key, ""))
-        focused = self.focus_field == key
-        rounded(self.screen, rect, 10, self.c_("surface2"))
-        rounded(
-            self.screen, rect, 10,
-            self.c_("accent") if focused else self.c_("border_strong"),
-            width=2 if focused else 1,
-        )
-        value = self.field_values[key]
-        shown = value if self.fonts.width(value, 10) < rect.width - 20 else "…" + value[-28:]
-        self.text(shown, (rect.left + 10, rect.centery), 10, self.c_("text"), align="left", valign="center")
-        if focused and self.caret_on:
-            cx = rect.left + 12 + self.fonts.width(shown, 10)
-            pygame.draw.line(self.screen, self.c_("accent"), (cx, rect.top + 8), (cx, rect.bottom - 8), 2)
-        self.hit(rect, lambda: self.focus_on(key))
-
-    def focus_on(self, key: str) -> None:
-        self.focus_field = key
-        self.sounds.play("click")
-
-    # ------------------------------------------------------- رندر کمکی ---
-
-    def draw_toast(self, w: int) -> None:
-        toast = self.toast or {}
-        remaining = toast.get("until", 0) - time.monotonic()
-        if remaining <= 0:
-            self.toast = None
-            return
-        alpha = int(255 * min(1.0, remaining / 0.6))
-        color = self.c_("danger") if toast.get("kind") == "error" else self.c_("ok")
-        width = min(w - 80, self.fonts.width(toast.get("text", ""), 11, True) + 60)
-        rect = pygame.Rect(0, 0, width, 38)
-        rect.midtop = (w // 2, HEADER_H + TABS_H + 8)
-        layer = pygame.Surface(rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(layer, with_alpha(self.c["surface"], alpha), layer.get_rect(), border_radius=12)
-        pygame.draw.rect(layer, with_alpha(color, alpha), layer.get_rect(), width=1, border_radius=12)
-        self.screen.blit(layer, rect)
-        self.text(toast.get("text", ""), (rect.centerx, rect.centery - 7), 11, with_alpha(color, alpha), True, align="center")
-
-    def draw_modal(self, w: int, h: int) -> None:
-        veil = pygame.Surface((w, h), pygame.SRCALPHA)
-        veil.fill((0, 0, 0, 130))
-        self.screen.blit(veil, (0, 0))
-
-        modal = self.modal or {}
-
-        # اندازه‌ی جعبه بر اساس طول متن
-        box_w = min(640, w - 80)
-        text_w = box_w - 48
-        line_h = self.fonts.get(11).get_height() + 3
-        lines: list[str] = []
-        for raw in str(modal.get("text", "")).split("\n"):
-            lines.extend(self.fonts.wrap(raw, 11, text_w) if raw.strip() else [""])
-        box_h = 78 + max(60, len(lines) * line_h) + 76
-
-        box = pygame.Rect(0, 0, box_w, box_h)
-        box.center = (w // 2, h // 2)
-        shadow(self.screen, box, 18, spread=16, alpha=90)
-        rounded(self.screen, box, 18, self.c_("surface"))
-        rounded(self.screen, box, 18, self.c_("border_strong"), width=1)
-
-        self.text(modal.get("title", ""), (box.right - 24, box.top + 20), 14, self.c_("text"), True)
-        text_rect = pygame.Rect(box.left + 24, box.top + 56, box.width - 48, box.height - 132)
-        self.paragraph(modal.get("text", ""), text_rect, 11, self.c_("text_dim"))
-
-        self.button(
-            pygame.Rect(box.right - 24 - 130, box.bottom - 58, 130, 38),
-            modal.get("yes_label", "بله"), self._modal_yes, kind="primary", size=12,
-        )
-        self.button(
-            pygame.Rect(box.right - 24 - 130 - 12 - 110, box.bottom - 58, 110, 38),
-            "انصراف", self._modal_no, size=12,
-        )
-
-    def modal_ask(self, title: str, message: str, on_yes) -> None:
-        self.sounds.play("notify")
-        self.modal = {"title": title, "text": message, "on_yes": on_yes}
-
-    def _modal_yes(self) -> None:
-        action = (self.modal or {}).get("on_yes")
-        self.modal = None
-        self.sounds.play("click")
-        if action:
-            action()
-
-    def _modal_no(self) -> None:
-        self.modal = None
-        self.sounds.play("click")
-        self.log("⏹ لغو شد.")
-
-    # ------------------------------------------------------------- رفتار ---
+        self.toast("خطا در logs/errors ذخیره شد", "error")
 
     def collab_info(self) -> tuple[str, str, str]:
         return (
@@ -2563,106 +1168,146 @@ class App:
     def collab_ready(self) -> bool:
         return all(self.collab_info())
 
-    def switch_tab(self, key: str) -> None:
-        if self.tab == key:
-            return
-        self.tab = key
-        self.focus_field = None
-        self.sounds.play("click")
-        if key == "codes":
-            self._scan_codes()
+    # --------------------------------------------------------------- وضعیت ---
 
-    def action_toggle_theme(self) -> None:
-        self.theme_name = "light" if self.theme_name == "dark" else "dark"
-        self.c = THEMES[self.theme_name]
-        self.settings["theme"] = self.theme_name
-        save_settings(self.settings)
-        self.log(f"🎨 تم {'تاریک' if self.theme_name == 'dark' else 'روشن'} شد.")
+    def get_state(self) -> dict:
+        """وضعیت کامل برای رسم صفحه (JS هر ۰.۷ ثانیه صدا می‌زند)."""
+        with self.lock:
+            logs = list(self.log_lines[-300:])
+            events = list(self.events)
+            self.events.clear()
 
-    def action_toggle_sound(self) -> None:
-        muted = self.sounds.toggle_mute()
-        self.settings["muted"] = muted
-        save_settings(self.settings)
-        self.log("🔇 صدا خاموش شد." if muted else "🔊 صدا روشن شد.")
-        if not muted:
-            self.sounds.play("toggle")
+        auto = bool(self.settings.get("auto"))
+        remaining = max(0.0, self.auto_next - time.time()) if auto else 0.0
 
-    def action_toggle_auto(self) -> None:
-        self.settings["auto"] = not self.settings.get("auto")
+        return {
+            "version": APP_VERSION,
+            "version_fa": to_fa(APP_VERSION),
+            "build": build_info()["commit"],
+            "now": int(time.time() * 1000),
+            "theme": self.settings.get("theme", "dark"),
+            "muted": bool(self.settings.get("muted", False)),
+            "auto": auto,
+            "busy": self.busy,
+            "auto_remaining": round(remaining, 1),
+            "auto_total": SYNC_POLL_SECONDS,
+            "logs": logs,
+            "events": events,
+            "status": {
+                key: {
+                    "state": "wait" if value is None else ("ok" if value else "bad"),
+                    "note": self.status_note.get(key, ""),
+                }
+                for key, value in self.status.items()
+            },
+            "codes": self.codes_index,
+            "shots": self._shots_index(),
+            "mother": dict(zip(("owner", "repo", "branch"), self.mother_info())),
+            "collab": dict(zip(("owner", "repo", "branch"), self.collab_info())),
+            "paths": {
+                "codes": str(get_desktop_dir() / CODES_FOLDER_NAME),
+                "logs": str(resolve_report_dir()[0]),
+                "shots": str(resolve_screenshot_dir()[0]),
+                "errors": str(error_dir()),
+                "state": str(STATE_DIR),
+            },
+            "auto_accept": auto,   # در حالت خودکار هیچ‌وقت اجازه نمی‌گیرد
+        }
+
+    def _shots_index(self) -> list[dict]:
+        folder = Path(resolve_screenshot_dir()[0])
+        items: list[dict] = []
+        try:
+            files = [
+                p for p in folder.iterdir()
+                if p.suffix.lower() in IMAGE_EXT and _SAFE_NAME.match(p.name)
+            ]
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            files = []
+        for path in files[:60]:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            items.append(
+                {
+                    "name": path.name,
+                    "url": f"/shots/{path.name}",
+                    "size": human_size(stat.st_size),
+                    "when": f"{jalali_date(tehran_now())} — {datetime.fromtimestamp(stat.st_mtime):%H:%M}",
+                }
+            )
+        return items
+
+    def _scan_codes(self) -> None:
+        """فهرست فایل‌های پایتون پوشه CODES + وضعیت اجرا."""
+        codes_dir = get_desktop_dir() / CODES_FOLDER_NAME
+        state = load_codes_state()
+        items: list[dict] = []
+        try:
+            files = sorted(codes_dir.glob("*.py"))
+        except OSError:
+            files = []
+
+        for path in files:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            info = state.get(path.name, {})
+            ran = bool(info)
+            ok = info.get("ok") if ran else None
+            items.append(
+                {
+                    "name": path.name,
+                    "stem": path.stem,
+                    "size": human_size(size),
+                    "ran": ran,
+                    "ok": ok,
+                    "status": "ok" if ok else ("error" if ran else "pending"),
+                    "ran_at": info.get("ran_at", ""),
+                    "duration": to_fa(str(info.get("duration_s", "—"))) if ran else "—",
+                    "exit_code": to_fa(str(info.get("exit_code", "—"))) if ran else "—",
+                }
+            )
+        self.codes_index = items
+
+    # ---------------------------------------------------------- دکمه‌ها ---
+
+    def toggle_auto(self) -> dict:
+        enabled = not bool(self.settings.get("auto"))
+        self.settings["auto"] = enabled
         save_settings(self.settings)
-        if self.settings["auto"]:
-            self.sounds.play("success")
+        if enabled:
+            self.sound("success")
             self.log("⚡ حالت خودکار روشن شد — بررسی و اجرا بدون پرسیدن.")
-            self._arm_auto()
-            self.toast_msg("حالت خودکار روشن شد")
+            self.toast("حالت خودکار روشن شد")
+            self._arm_watch()
         else:
             self.log("🔒 حالت دستی — هیچ کاری بدون اجازه تو انجام نمی‌شود.")
-            self.toast_msg("حالت دستی شد")
+            self.toast("حالت دستی شد")
+            self._watch_stop.set()
+        return self.get_state()
 
-    def _arm_auto(self) -> None:
-        self.auto_next = time.monotonic() + SYNC_POLL_SECONDS
+    def set_theme(self, theme: str) -> dict:
+        if theme in ("dark", "light"):
+            self.settings["theme"] = theme
+            save_settings(self.settings)
+        return self.get_state()
 
-    # --------------------------------------------------------- دکمه‌ها ---
+    def set_muted(self, muted: bool) -> dict:
+        self.settings["muted"] = bool(muted)
+        save_settings(self.settings)
+        self.log("🔇 صدا خاموش شد." if muted else "🔊 صدا روشن شد.")
+        return self.get_state()
 
-    def action_capture(self) -> None:
-        if self.busy:
-            return
-        self.sounds.play("open")
-        self._start_job("گرفتن اسکرین‌شات", self._job_capture)
-
-    def action_report(self) -> None:
-        if self.busy:
-            return
-        self.sounds.play("run")
-        self._start_job("گرفتن گزارش", self._job_report)
-
-    def open_path(self, path) -> None:
-        """باز کردن فایل یا پوشه با برنامه پیش‌فرض ویندوز."""
-        try:
-            if IS_WINDOWS:
-                os.startfile(str(path))  # type: ignore[attr-defined]
-            else:
-                subprocess.Popen(["xdg-open", str(path)])
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"⚠️ باز کردن ممکن نشد: {exc}")
-
-    def action_clear_log(self) -> None:
-        self.log_lines.clear()
-        self.sounds.play("click")
-        self.toast_msg("گزارش پاک شد")
-
-    def action_scan_codes(self) -> None:
-        self._scan_codes()
-        self.sounds.play("click")
-        self.toast_msg("فهرست کدها به‌روز شد")
-
-    def action_check_collab(self) -> None:
-        if self.busy:
-            return
-        if not self.collab_ready():
-            self.toast_msg("اول مخزن همکار را تنظیم و ذخیره کن", "error")
-            return
-        self.sounds.play("download" if False else "open")
-        self._start_job("بررسی مخزن همکار", lambda: self._job_fetch(manual=not self.settings["auto"]))
-
-    def action_run_new(self) -> None:
-        if self.busy:
-            return
-        self.sounds.play("run")
-        self._start_job("اجرای کدهای جدید", lambda: self._job_run_new(manual=not self.settings["auto"]))
-
-    def action_run_single(self, path: Path) -> None:
-        if self.busy:
-            return
-        self.sounds.play("run")
-        self.log(f"▶️ اجرای دوباره {path.name}")
-        self._start_job(path.name, lambda: self._job_run_single(path))
-
-    def action_save_repo(self, prefix: str) -> None:
-        values = getattr(self, "field_values", {})
-        owner = values.get(f"{prefix}_owner", "").strip()
-        repo = values.get(f"{prefix}_repo", "").strip()
-        branch = values.get(f"{prefix}_branch", "").strip()
+    def save_repo(self, prefix: str, owner: str, repo: str, branch: str) -> dict:
+        if prefix not in ("mother", "collab"):
+            return self.get_state()
+        owner = (owner or "").strip()
+        repo = (repo or "").strip()
+        branch = (branch or "").strip()
         if "/" in owner:
             owner, _, rest = owner.partition("/")
             repo = repo or rest
@@ -2670,84 +1315,212 @@ class App:
         self.settings[f"{prefix}_repo"] = repo
         self.settings[f"{prefix}_branch"] = branch or "main"
         save_settings(self.settings)
-        self.sounds.play("success")
         name = "مادر" if prefix == "mother" else "همکار"
-        self.log(f"💾 مخزن {name} ذخیره شد: {owner}/{repo} @ {self.settings[f'{prefix}_branch']}")
-        self.toast_msg("ذخیره شد")
+        self.log(f"💾 مخزن {name} ذخیره شد: {owner}/{repo} @ {branch}")
+        self.sound("success")
+        self.toast("ذخیره شد")
+        return self.get_state()
+
+    def clear_log(self) -> dict:
+        with self.lock:
+            self.log_lines.clear()
+        self.toast("گزارش پاک شد")
+        return self.get_state()
+
+    def open_path(self, which: str) -> dict:
+        """باز کردن پوشه یا فایل با برنامه‌ی پیش‌فرض ویندوز."""
+        targets = {
+            "codes": get_desktop_dir() / CODES_FOLDER_NAME,
+            "logs": resolve_report_dir()[0],
+            "shots": resolve_screenshot_dir()[0],
+            "errors": error_dir(),
+            "state": STATE_DIR,
+        }
+        target = targets.get(which)
+        if target is None:
+            return self.get_state()
+        try:
+            if IS_WINDOWS:
+                os.startfile(str(target))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(target)])
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"⚠️ باز کردن ممکن نشد: {exc}")
+        return self.get_state()
+
+    def open_shot(self, name: str) -> dict:
+        if not _SAFE_NAME.match(name or ""):
+            return self.get_state()
+        path = Path(resolve_screenshot_dir()[0]) / name
+        try:
+            if IS_WINDOWS:
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"⚠️ باز کردن تصویر ممکن نشد: {exc}")
+        return self.get_state()
+
+    def check_collab(self, confirmed: bool = False) -> dict:
+        """بررسی مخزن همکار. در حالت دستی اول اجازه می‌گیرد."""
+        if self.busy:
+            return {"need_confirm": False, "state": self.get_state()}
+        if not self.collab_ready():
+            self.toast("اول مخزن همکار را تنظیم و ذخیره کن", "error")
+            return self.get_state()
+
+        if not confirmed and not self.settings.get("auto"):
+            return {
+                "need_confirm": True,
+                "title": "بررسی مخزن همکار",
+                "message": "مخزن ایجنت همکار بررسی شود؟ اگر کد تازه‌ای باشد، دانلود می‌شود.",
+                "action": "check_collab",
+            }
+
+        self._start_job("بررسی مخزن همکار", self._job_fetch)
+        return self.get_state()
+
+    def run_new(self, confirmed: bool = False) -> dict:
+        pending = [c for c in self.codes_index if not c["ran"]]
+        if not pending:
+            self.toast("کد جدیدی برای اجرا نیست")
+            return self.get_state()
+
+        if not confirmed and not self.settings.get("auto"):
+            names = "، ".join(c["name"] for c in pending[:6])
+            return {
+                "need_confirm": True,
+                "title": "اجرای کدهای جدید",
+                "message": f"{len(pending)} کد آماده اجراست:\n{names}\n\nاجرا شود؟",
+                "action": "run_new",
+            }
+
+        self._start_job("اجرای کدهای جدید", self._job_run_new)
+        return self.get_state()
+
+    def run_single(self, name: str, confirmed: bool = False) -> dict:
+        if not _SAFE_NAME.match(name or ""):
+            return self.get_state()
+        if self.busy:
+            return self.get_state()
+
+        if not confirmed and not self.settings.get("auto"):
+            return {
+                "need_confirm": True,
+                "title": "اجرای دوباره",
+                "message": f"کد «{name}» دوباره اجرا شود؟",
+                "action": "run_single",
+                "arg": name,
+            }
+
+        path = get_desktop_dir() / CODES_FOLDER_NAME / name
+        if not path.is_file():
+            self.toast("فایل پیدا نشد", "error")
+            return self.get_state()
+        self._start_job(name, lambda: self._job_run_single(path))
+        return self.get_state()
+
+    def take_screenshot(self, confirmed: bool = False) -> dict:
+        if self.busy:
+            return self.get_state()
+        if not confirmed and not self.settings.get("auto"):
+            return {
+                "need_confirm": True,
+                "title": "گرفتن اسکرین‌شات",
+                "message": f"{LMARENA_URL} در کروم باز شود و بعد از ۵ ثانیه عکس گرفته شود؟",
+                "action": "take_screenshot",
+            }
+        self._start_job("گرفتن اسکرین‌شات", self._job_capture)
+        return self.get_state()
+
+    def open_report(self, confirmed: bool = False) -> dict:
+        if self.busy:
+            return self.get_state()
+        if not confirmed and not self.settings.get("auto"):
+            return {
+                "need_confirm": True,
+                "title": "گزارش برنامه‌های باز",
+                "message": "فهرست پنجره‌های باز ویندوز گرفته و در logs ذخیره شود؟",
+                "action": "open_report",
+            }
+        self._start_job("گرفتن گزارش", self._job_report)
+        return self.get_state()
+
+    def rescan_codes(self) -> dict:
+        self._scan_codes()
+        self.toast("فهرست کدها به‌روز شد")
+        return self.get_state()
 
     # ------------------------------------------------------------ کارها ---
 
     def _start_job(self, label: str, job) -> None:
         self.busy = label
-        self._busy_started = time.monotonic()
+        self.emit("busy", label=label)
 
         def runner() -> None:
             try:
                 job()
             except Exception as exc:  # noqa: BLE001
                 detail = traceback.format_exc()
-                self.post(lambda d=detail, l=label, e=exc: self.report_error(f"خطا در «{l}»: {e}", d))
-                self.post(lambda: self.sounds.play("error"))
+                self.report_error(f"خطا در «{label}»: {exc}", detail)
+                self.sound("error")
             finally:
-                self.post(self._end_job)
+                self.busy = None
+                self.emit("idle")
+                self._scan_codes()
+                if self.settings.get("auto"):
+                    self._arm_watch()
 
         threading.Thread(target=runner, daemon=True).start()
-
-    def _end_job(self) -> None:
-        self.busy = None
-        self._scan_codes()
-        if self.settings.get("auto"):
-            self._arm_auto()
 
     def _job_capture(self) -> None:
         self.log(f"📸 باز کردن {LMARENA_URL} در کروم…")
         try:
-            note = open_in_chrome(LMARENA_URL)
-            self.log(f"   {note}")
+            self.log(f"   {open_in_chrome(LMARENA_URL)}")
         except Exception as exc:  # noqa: BLE001
             self.log(f"   ⚠️ {exc}")
         self.log(f"   صبر {PAGE_LOAD_SECONDS} ثانیه برای کامل شدن صفحه…")
         time.sleep(PAGE_LOAD_SECONDS)
         dest, on_drive = resolve_screenshot_dir()
         path = take_screenshot(dest)
-        self.post(lambda: self.sounds.play("shutter"))
-        where = "گوگل درایو" if on_drive else "دسکتاپ (درایو در دسترس نبود)"
+        self.sound("shutter")
         self.log(f"✅ اسکرین‌شات ذخیره شد → {path}")
-        self.log(f"   محل: {where}")
-        self.post(lambda: self.toast_msg("اسکرین‌شات گرفته شد"))
+        self.log(f"   محل: {'گوگل درایو' if on_drive else 'دسکتاپ (درایو در دسترس نبود)'}")
+        self.toast("اسکرین‌شات گرفته شد")
 
     def _job_report(self) -> None:
         self.log("📋 خواندن فهرست پنجره‌های باز…")
         windows = collect_open_windows()
-        report = format_windows_report(windows)
         dest, on_drive = resolve_report_dir()
-        path = save_report(report, dest)
+        path = save_report(format_windows_report(windows), dest)
         self.log(f"✅ گزارش ذخیره شد ({len(windows)} پنجره) → {path.name}")
         if not on_drive:
             self.log("   ⚠️ گوگل درایو در دسترس نبود؛ روی دسکتاپ ذخیره شد.")
-        self.post(lambda: self.sounds.play("success"))
-        self.post(lambda: self.toast_msg("گزارش ذخیره شد"))
+        self.sound("success")
+        self.toast("گزارش ذخیره شد")
 
-    def _job_fetch(self, manual: bool) -> None:
+    def _job_fetch(self) -> None:
         owner, repo, branch = self.collab_info()
         self.log(f"📥 بررسی {owner}/{repo} @ {branch}")
         data = repo_zip(owner, repo, branch)
         if not data:
-            self.post(lambda: self._set_status("collab", False, "قطع"))
+            self.status["collab"] = False
+            self.status_note["collab"] = "قطع"
             self.log(f"❌ دریافت از {owner}/{repo} ممکن نشد.")
-            self.post(lambda: self.sounds.play("error"))
-            self.post(lambda: self.report_error(
+            self.sound("error")
+            self.report_error(
                 "دریافت مخزن ایجنت همکار ممکن نشد",
                 f"آدرس: {owner}/{repo} @ {branch}\n"
                 "احتمال: قطع بودن اینترنت، فیلتر بودن گیت‌هاب، یا اشتباه بودن نام مخزن/شاخه.",
-            ))
+            )
             return
 
         files = extract_py_files(data)
-        self.post(lambda: self._set_status("collab", True, f"{len(files)} فایل"))
+        self.status["collab"] = True
+        self.status_note["collab"] = f"{len(files)} فایل"
         if not files:
             self.log("📭 در مخزن همکار هیچ فایل پایتونی نیست.")
-            self.post(lambda: self.toast_msg("فایل پایتونی پیدا نشد", "error"))
+            self.toast("فایل پایتونی پیدا نشد", "error")
             return
 
         codes_dir = ensure_codes_dir()
@@ -2763,38 +1536,27 @@ class App:
 
         if not new_files:
             self.log("✅ فایل جدیدی نبود — پوشه CODES به‌روز است.")
-            self.post(lambda: self.toast_msg("پوشه CODES به‌روز است"))
+            self.toast("پوشه CODES به‌روز است")
             return
 
-        self.log(f"🆕 {len(new_files)} فایل تازه: {', '.join(sorted(new_files))}")
+        written = 0
+        for name, content in new_files.items():
+            try:
+                (codes_dir / name).write_bytes(content)
+                written += 1
+            except OSError as exc:
+                self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
 
-        def deliver() -> None:
-            written = 0
-            for name, content in new_files.items():
-                try:
-                    (codes_dir / name).write_bytes(content)
-                    written += 1
-                except OSError as exc:
-                    self.log(f"⚠️ نوشتن {name} ممکن نشد: {exc}")
-            self.log(f"📥 {written} فایل در پوشه CODES ذخیره شد.")
-            self.post(lambda: self._after_deliver(written))
-
-        if manual:
-            listing = "\n".join(f"• {name}" for name in sorted(new_files))
-            self.post(lambda: self.modal_ask(
-                "دانلود کدهای جدید",
-                f"{len(new_files)} فایل تازه در مخزن همکار هست:\n{listing}\n\nدر پوشه CODES ذخیره شود؟",
-                lambda: self.post(deliver),
-            ))
-        else:
-            deliver()  # در حالت خودکار بی‌درنگ و بدون پرسیدن
-
-    def _after_deliver(self, written: int) -> None:
-        self.sounds.play("success")
-        self.toast_msg(f"{written} فایل دانلود شد")
+        self.log(f"🆕 {', '.join(sorted(new_files))}")
+        self.log(f"📥 {written} فایل در پوشه CODES ذخیره شد.")
+        self.sound("success")
+        self.toast(f"{written} فایل دانلود شد")
         self._scan_codes()
 
-    def _job_run_new(self, manual: bool) -> None:
+        if self.settings.get("auto"):
+            self._job_run_new()
+
+    def _job_run_new(self) -> None:
         codes_dir = ensure_codes_dir()
         state = load_codes_state()
         pending = []
@@ -2808,232 +1570,145 @@ class App:
 
         if not pending:
             self.log("✅ کد جدیدی برای اجرا نیست.")
-            self.post(lambda: self.toast_msg("کد جدیدی نیست"))
+            self.toast("کد جدیدی نیست")
             return
-
-        def run_all() -> None:
-            self._run_paths(pending)
-
-        if manual:
-            listing = "\n".join(f"• {p.name}" for p in pending)
-            self.post(lambda: self.modal_ask(
-                "اجرای کدها",
-                f"{len(pending)} کد آماده اجراست:\n{listing}\n\nاجرا شود؟",
-                lambda: self.post(run_all),
-            ))
-        else:
-            run_all()
+        self._run_paths(pending)
 
     def _job_run_single(self, path: Path) -> None:
-        self._run_paths([path], force=True)
+        self.log(f"▶️ اجرای دوباره {path.name}")
+        self._run_paths([path])
 
-    def _run_paths(self, paths: list[Path], force: bool = False) -> None:
-        self.post(lambda: self.sounds.play("run"))
+    def _run_paths(self, paths: list[Path]) -> None:
+        self.sound("run")
         for path in paths:
             self.log(f"▶️ اجرای {path.name}")
             ok, name, text = run_code_job(path)
             for line in text.splitlines()[-8:]:
                 self.log(f"   {line}")
             self.log(f"{'✅ پایان' if ok else '❌ خطا در'} {name}")
-            self.post(lambda o=ok: self.sounds.play("success" if o else "error"))
-        self.post(lambda: self.toast_msg("اجرا تمام شد"))
-        self.post(self._scan_codes)
+            self.sound("success" if ok else "error")
+        self.toast("اجرا تمام شد")
+        self._scan_codes()
 
-    # ------------------------------------------------- کدها و وضعیت‌ها ---
+    # -------------------------------------------- حلقه خودکار و وضعیت‌ها ---
 
-    def _scan_codes(self) -> None:
-        codes_dir = get_desktop_dir() / CODES_FOLDER_NAME
-        state = load_codes_state()
-        items: list[dict] = []
-        try:
-            files = sorted(codes_dir.glob("*.py"))
-        except OSError:
-            files = []
-        for path in files:
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
-            info = state.get(path.name, {})
-            ran = bool(info)
-            ok = info.get("ok") if ran else None
-            chips: list[tuple[str, str, bool]] = []
-            if ran:
-                chips.append(("اجرا شده", "ok", True))
-                code = info.get("exit_code")
-                chips.append((f"خروج {to_fa(str(code))}", "ok" if code == 0 else "danger", True))
-            else:
-                chips.append(("اجرا نشده", "warn", True))
-            if ran:
-                meta = (
-                    f"{info.get('ran_at', '?')}  ·  {to_fa(str(info.get('duration_s', '?')))} ثانیه"
-                    f"  ·  {human_size(size)}"
-                )
-            else:
-                meta = f"اجرا نشده  ·  {human_size(size)}"
-            items.append(
-                {"name": path.name, "path": path, "meta": meta, "chips": chips, "ran": ran, "ok": ok}
-            )
-        self.codes_index = items
-        self.codes_loaded_at = time.monotonic()
+    def _arm_watch(self) -> None:
+        self.auto_next = time.time() + SYNC_POLL_SECONDS
+        if self._watch_running:
+            return
+        self._watch_running = True
+        self._watch_stop.clear()
 
-    def _set_status(self, key: str, ok: bool, note: str) -> None:
-        self.status[key] = ok
-        self.status_note[key] = note
+        def loop() -> None:
+            while not self._watch_stop.is_set():
+                if not self.settings.get("auto"):
+                    break
+                if self.busy is None and time.time() >= self.auto_next:
+                    if self.busy is None:
+                        self._start_job("دور خودکار", self._auto_cycle)
+                self._watch_stop.wait(0.5)
+            self._watch_running = False
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _auto_cycle(self) -> None:
+        self._job_fetch()
 
     def _start_status_monitor(self) -> None:
         def loop() -> None:
             while True:
                 internet = check_internet()
-                self.post(lambda: self._set_status("internet", internet, "وصل" if internet else "قطع"))
+                self.status["internet"] = internet
+                self.status_note["internet"] = "وصل" if internet else "قطع"
                 if internet:
-                    ok, note = check_google_drive()
-                    self.post(lambda: self._set_status("drive", ok, "آماده" if ok else "نیست"))
+                    ok, _note = check_google_drive()
+                    self.status["drive"] = ok
+                    self.status_note["drive"] = "آماده" if ok else "نیست"
                 else:
-                    self.post(lambda: self._set_status("drive", False, "نیست"))
+                    self.status["drive"] = False
+                    self.status_note["drive"] = "نیست"
                 time.sleep(STATUS_CHECK_SECONDS)
 
         threading.Thread(target=loop, daemon=True).start()
 
-    # ----------------------------------------------- به‌روزرسانی (دستی) ---
-
-    def _no_self_update(self) -> None:
-        """برنامه هیچ نسخه‌ای را از گیت‌هاب نمی‌گیرد؛ به‌روزرسانی با گیت‌هاب دسکتاپ است."""
-
-    # -------------------------------------------------------- حلقه اصلی ---
-
-    def handle_event(self, event) -> None:
-        if event.type == pygame.QUIT:
-            self.running = False
-            return
-        if event.type == pygame.VIDEORESIZE:
-            self.screen = pygame.display.set_mode((max(760, event.w), max(560, event.h)), pygame.RESIZABLE)
-            return
-        if event.type == pygame.MOUSEMOTION:
-            self.mouse = event.pos
-            return
-        if event.type == pygame.MOUSEWHEEL:
-            key = self.tab
-            self.scroll_target[key] = max(0.0, self.scroll_target[key] - event.y * 70)
-            return
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            self.mouse = event.pos
-            for rect, callback in reversed(self.hits):
-                if rect.collidepoint(event.pos):
-                    if callback:
-                        callback()
-                    return
-            self.focus_field = None
-            return
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                if self.modal:
-                    self.modal = None
-                self.focus_field = None
-                return
-            if self.focus_field:
-                key = self.focus_field
-                value = self.field_values.get(key, "")
-                if event.key == pygame.K_BACKSPACE:
-                    self.field_values[key] = value[:-1]
-                elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
-                    self.focus_field = None
-                elif event.unicode and event.unicode.isprintable() and len(value) < 80:
-                    self.field_values[key] = value + event.unicode
-            return
-
-    def run(self) -> None:
-        try:
-            pygame.key.start_text_input()
-        except Exception:
-            pass
-        while self.running:
-            dt = self.clock.tick(60) / 1000.0
-            for event in pygame.event.get():
-                self.handle_event(event)
-            self.update(dt)
-            self.draw()
-            pygame.display.flip()
-        pygame.quit()
-
-    def update(self, dt: float) -> None:
-        # کارهای معلق از تردها
-        try:
-            while True:
-                fn = self.events.get_nowait()
-                try:
-                    fn()
-                except Exception as exc:  # noqa: BLE001
-                    self.log(f"⚠️ خطا در به‌روزرسانی رابط: {exc}")
-                    self.report_error("خطا در به‌روزرسانی رابط", traceback.format_exc())
-        except queue.Empty:
-            pass
-
-        self.caret_t += dt
-        if self.caret_t >= 0.55:
-            self.caret_t = 0.0
-            self.caret_on = not self.caret_on
-
-        self._spinner = (self._spinner + dt * 240) % 360
-
-        for key in self.scroll:
-            if key == self.tab:
-                self.scroll[key] += (self.scroll_target[key] - self.scroll[key]) * min(1.0, dt * 14)
-
-        # زمان‌بند حالت خودکار
-        if self.settings.get("auto"):
-            remaining = self.auto_next - time.monotonic()
-            if 0 < remaining <= 3.2:
-                if int(remaining * 2) != getattr(self, "_last_tick", -1):
-                    self._last_tick = int(remaining * 2)
-                    if int(remaining * 2) % 2 == 0:
-                        self.sounds.play("tick")
-            if remaining <= 0 and not self.busy:
-                self.auto_next = time.monotonic() + SYNC_POLL_SECONDS
-                self._start_job("دور خودکار", self._auto_cycle)
-
-    def _auto_cycle(self) -> None:
-        """دور خودکار: فقط گرفتن کدهای همکار و اجرای آن‌ها (بدون دستکاری خود برنامه)."""
-        self._job_fetch(manual=False)
-        self._job_run_new(manual=False)
-
 
 # ------------------------------------------------------------------ شروع ---
 
-
 def main() -> None:
     enable_dpi_awareness()
-    if pygame is None:
+
+    try:
+        import webview
+    except ImportError:
         message = (
-            "کتابخانه pygame نصب نیست.\n\n"
+            "کتابخانه pywebview نصب نیست.\n\n"
             "فایل run.bat را اجرا کنید تا خودکار نصب شود،\n"
             "یا این دستور را بزنید:\n"
-            "    pip install pygame arabic-reshaper python-bidi"
+            "    pip install pywebview\n"
         )
-        write_error("pygame نصب نیست", message)
+        write_error("pywebview نصب نیست", message)
         if IS_WINDOWS:
             try:
-                ctypes.windll.user32.MessageBoxW(0, message, "Windows Agent", 0x10)
+                ctypes.windll.user32.MessageBoxW(0, message, "ایجنت ویندوز", 0x10)
             except Exception:
                 pass
         print(message)
         return
 
-    try:
-        app = App()
-        app.run()
-    except Exception:
-        detail = traceback.format_exc()
-        path = write_error("خطای اجرای برنامه", detail)
-        where = str(path) if path else "ذخیره نشد"
+    if not UI_INDEX.is_file():
+        message = f"فایل رابط کاربری پیدا نشد:\n{UI_INDEX}"
+        write_error("فایل رابط کاربری نیست", message)
+        if IS_WINDOWS:
+            try:
+                ctypes.windll.user32.MessageBoxW(0, message, "ایجنت ویندوز", 0x10)
+            except Exception:
+                pass
+        return
+
+    server, port = start_ui_server()
+    api = Api()
+    url = f"http://127.0.0.1:{port}/"
+
+    window = webview.create_window(
+        "ایجنت ویندوز — پنل ویندوز",
+        url=url,
+        js_api=api,
+        width=1180,
+        height=820,
+        min_size=(940, 640),
+        background_color="#161511",
+        text_select=False,
+    )
+
+    def on_loaded() -> None:
         try:
-            if IS_WINDOWS:
-                ctypes.windll.user32.MessageBoxW(
-                    0, f"برنامه با خطا بسته شد.\n\nجزئیات:\n{where}", "Windows Agent", 0x10
-                )
+            window.evaluate_js("document.documentElement.dataset.ready='1';")
         except Exception:
             pass
+
+    try:
+        webview.start(on_loaded, private_mode=False, storage_path=str(STATE_DIR / "webview"))
+    except Exception as exc:  # noqa: BLE001
+        detail = traceback.format_exc()
+        path = write_error("اجرای پنجره WebView ممکن نشد", detail)
+        message = (
+            "پنجره برنامه باز نشد.\n\n"
+            "روی ویندوز، برنامه به «WebView2 Runtime» نیاز دارد.\n"
+            "آن را از این آدرس نصب کن و دوباره تلاش کن:\n"
+            "https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
+            f"جزئیات: {path or exc}"
+        )
+        if IS_WINDOWS:
+            try:
+                ctypes.windll.user32.MessageBoxW(0, message, "ایجنت ویندوز", 0x10)
+            except Exception:
+                pass
         traceback.print_exc()
+    finally:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

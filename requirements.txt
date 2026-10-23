@@ -1,9 +1,5 @@
-# رابط کاربری و گرافیک
-pygame>=2.5
-
-# نمایش صحیح متن فارسی در pygame
-arabic-reshaper>=3.0.0
-python-bidi>=0.4.2
+# رابط کاربری: پنجره‌ی WebView2 با HTML/CSS/JS
+pywebview>=5.0
 
 # گرفتن اسکرین‌شات
 Pillow>=9.0.0

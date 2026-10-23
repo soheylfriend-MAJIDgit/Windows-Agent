@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ایجنت ویندوز — پنل ویندوز</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════ هدر ═══════════════════════════════ -->
+<header class="app-header">
+  <div class="brand">
+    <div class="logo">WA</div>
+    <div class="brand-text">
+      <h1>ایجنت ویندوز</h1>
+      <span class="badge-panel"><i></i>پنل ویندوز</span>
+      <span class="build">نسخه <b id="version">۱.۶</b> · شناسه <span id="build">—</span></span>
+    </div>
+  </div>
+
+  <div class="header-tools">
+    <div class="clock">
+      <time id="clock">--:--:--</time>
+      <span id="date">—</span>
+    </div>
+    <button class="icon-btn" id="mute-btn" title="صدا">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h3l4-3.5v13L7 15H4z"/><path class="wave" d="M15 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M17.5 6a8.5 8.5 0 0 1 0 12"/><path class="slash" d="M15 8l6 8M21 8l-6 8"/></svg>
+    </button>
+    <button class="icon-btn" id="theme-btn" title="تغییر تم">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle class="sun-core" cx="12" cy="12" r="4.2"/><g class="sun-rays"><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7"/></g><path class="moon" d="M15.6 3.4a8.7 8.7 0 1 0 5 13.8A9.3 9.3 0 0 1 15.6 3.4z"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════ تب‌ها ═══════════════════════════════ -->
+<nav class="tabs-wrap">
+  <div class="tabs" id="tabs-row-1"></div>
+  <div class="tabs" id="tabs-row-2"></div>
+</nav>
+
+<!-- ═══════════════════════════════ محتوا ═══════════════════════════════ -->
+<main id="views">
+
+  <!-- ─────────────── مغز ایجنت ─────────────── -->
+  <section class="view" data-tab="main">
+    <div class="grid-top">
+      <article class="card state-card">
+        <div class="ring-wrap">
+          <svg class="ring" viewBox="0 0 100 100" aria-hidden="true">
+            <circle class="ring-track" cx="50" cy="50" r="42"/>
+            <circle class="ring-value" id="ring" cx="50" cy="50" r="42"/>
+          </svg>
+          <div class="ring-center">
+            <b id="ring-number">—</b>
+            <span id="ring-label">ثانیه</span>
+          </div>
+        </div>
+        <div class="state-body">
+          <span class="label">حالت اجرا</span>
+          <strong id="mode-title">دستی</strong>
+          <p id="mode-hint">هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود.</p>
+        </div>
+        <label class="switch" title="حالت دستی / خودکار">
+          <input type="checkbox" id="auto-switch">
+          <span class="track"><span class="knob"></span></span>
+        </label>
+      </article>
+
+      <article class="card stats-card">
+        <span class="label">کدهای ایجنت همکار</span>
+        <div class="stats">
+          <div class="stat"><b id="stat-total">۰</b><span>کل کدها</span></div>
+          <div class="stat ok"><b id="stat-done">۰</b><span>اجرا شده</span></div>
+          <div class="stat warn"><b id="stat-pending">۰</b><span>در انتظار</span></div>
+        </div>
+        <button class="btn btn-primary" id="btn-check">
+          <svg viewBox="0 0 24 24"><path d="M12 4v10m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
+          بررسی مخزن همکار
+        </button>
+      </article>
+    </div>
+
+    <article class="card actions-card">
+      <span class="label">کارهای سریع</span>
+      <div class="actions">
+        <button class="btn btn-ghost" id="btn-shot">
+          <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></svg>
+          گرفتن اسکرین‌شات
+        </button>
+        <button class="btn btn-ghost" id="btn-report">
+          <svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/></svg>
+          گزارش برنامه‌های باز
+        </button>
+        <button class="btn btn-ghost" id="btn-open-codes">
+          <svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v10H4z"/></svg>
+          پوشه کدها
+        </button>
+      </div>
+    </article>
+
+    <article class="card system-card">
+      <span class="label">وضعیت سیستم</span>
+      <dl id="paths"></dl>
+    </article>
+  </section>
+
+  <!-- ─────────────── ایجنت مادر ─────────────── -->
+  <section class="view" data-tab="mother">
+    <article class="card">
+      <h2>ایجنت مادر</h2>
+      <p class="muted">این بخش در نسخه‌های بعدی ساخته می‌شود.</p>
+      <div class="note-box">
+        <p>اینجا جای ایجنت مادر است: همان ایجنتی که این برنامه را می‌نویسد و نسخه می‌دهد.</p>
+        <p>برنامه هیچ نسخه‌ای را خودکار از گیت‌هاب نمی‌گیرد — به‌روزرسانی دستی با GitHub Desktop است.</p>
+      </div>
+      <div class="repo-line">
+        <span>مخزن فعلی</span>
+        <code id="mother-repo-code">—</code>
+      </div>
+    </article>
+  </section>
+
+  <!-- ─────────────── ایجنت همکار ─────────────── -->
+  <section class="view" data-tab="collab">
+    <article class="card repo-card">
+      <h2>مخزن ایجنت همکار</h2>
+      <p class="muted">فایل‌های پایتون این مخزن در پوشه CODES ذخیره و اجرا می‌شوند.</p>
+      <div class="fields" data-repo="collab">
+        <label><span>مالک</span><input data-field="owner" spellcheck="false"></label>
+        <label><span>مخزن</span><input data-field="repo" spellcheck="false"></label>
+        <label><span>شاخه</span><input data-field="branch" spellcheck="false"></label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" data-save="collab">ذخیره</button>
+        <span class="muted small" id="collab-current"></span>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="row-actions wide">
+        <button class="btn btn-primary" id="btn-check-2">
+          <svg viewBox="0 0 24 24"><path d="M12 4v10m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
+          بررسی مخزن همکار
+        </button>
+        <button class="btn" id="btn-run-new">
+          <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg>
+          اجرای کدهای جدید
+        </button>
+        <span class="muted small" id="collab-hint"></span>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2>چطور کار می‌کند</h2>
+      <ol class="steps">
+        <li>ایجنت همکار فایل <code>.py</code> را در مخزن خودش می‌گذارد.</li>
+        <li>دکمه «بررسی مخزن همکار» فایل‌ها را در پوشه <code>CODES</code> روی دسکتاپ می‌گذارد.</li>
+        <li>دکمه «اجرای کدهای جدید» آن‌ها را اجرا و نتیجه را در <code>logs</code> گوگل درایو می‌نویسد.</li>
+        <li>هر کدی که قبلاً اجرا شده، در «کتابخانه کدها» با دکمه پخش دوباره قابل اجراست.</li>
+      </ol>
+    </article>
+  </section>
+
+  <!-- ─────────────── ایجنت مدیریت ─────────────── -->
+  <section class="view" data-tab="manage">
+    <article class="card">
+      <h2>ایجنت مدیریت</h2>
+      <p class="muted">یک سایت مدیریتی بیرونی که کدهای ایجنت همکار را می‌خواند، دوباره اجرا می‌کند و به همکار پرامپت می‌دهد.</p>
+      <div class="chips" id="manage-chips"></div>
+    </article>
+
+    <article class="card">
+      <h2>مخزن‌هایی که در اختیار دارد</h2>
+      <ul class="repo-list">
+        <li><i class="dot due"></i><b>ایجنت مادر</b><span class="muted">فقط خواندن</span><code id="manage-mother">—</code></li>
+        <li><i class="dot accent"></i><b>ایجنت همکار</b><span class="muted">خواندن و نوشتن</span><code id="manage-collab">—</code></li>
+      </ul>
+      <div class="note-box warn-box">
+        برای ساختن این سایت، فایل <code>docs/manager-agent-prompt.md</code> را به ایجنت مدیریت بده.
+      </div>
+    </article>
+  </section>
+
+  <!-- ─────────────── کتابخانه کدها ─────────────── -->
+  <section class="view" data-tab="codes">
+    <article class="card head-card">
+      <div>
+        <h2>کتابخانه کدها</h2>
+        <p class="muted small" id="codes-path">—</p>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-ghost" id="btn-rescan">به‌روزرسانی</button>
+        <span class="muted small" id="codes-count"></span>
+      </div>
+    </article>
+    <div id="codes-list" class="list"></div>
+    <div id="codes-empty" class="empty-state hidden">
+      <strong>هنوز کدی در پوشه CODES نیست</strong>
+      <span>از تب «ایجنت همکار» دکمه بررسی مخزن را بزنید.</span>
+    </div>
+  </section>
+
+  <!-- ─────────────── اسکرین‌شات‌ها ─────────────── -->
+  <section class="view" data-tab="shots">
+    <article class="card head-card">
+      <div>
+        <h2>اسکرین‌شات‌ها</h2>
+        <p class="muted small" id="shots-path">—</p>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-ghost" id="btn-open-shots">باز کردن پوشه</button>
+        <span class="muted small" id="shots-count"></span>
+      </div>
+    </article>
+    <div id="shots-grid" class="shots-grid"></div>
+    <div id="shots-empty" class="empty-state hidden">
+      <strong>هنوز اسکرین‌شاتی ذخیره نشده</strong>
+      <span>در تب مغز ایجنت دکمه «گرفتن اسکرین‌شات» را بزنید.</span>
+    </div>
+  </section>
+
+  <!-- ─────────────── گزارش زنده ─────────────── -->
+  <section class="view" data-tab="live">
+    <article class="card log-card">
+      <div class="head-card">
+        <h2>گزارش زنده</h2>
+        <div class="row-actions">
+          <button class="btn btn-ghost" id="btn-clear-log">پاک کردن</button>
+          <span class="muted small" id="log-count"></span>
+        </div>
+      </div>
+      <div class="log" id="log"></div>
+    </article>
+  </section>
+
+  <!-- ─────────────── تغییرات ─────────────── -->
+  <section class="view" data-tab="changes">
+    <article class="card">
+      <h2>تاریخچه نسخه‌ها</h2>
+      <div id="changelog" class="changelog"></div>
+    </article>
+  </section>
+
+</main>
+
+<!-- ═══════════════════════════════ نوار وضعیت ═══════════════════════════════ -->
+<footer class="statusbar">
+  <div class="lamps" id="lamps"></div>
+  <div class="status-mode" id="status-mode">حالت دستی</div>
+</footer>
+
+<!-- ═══════════════════════════════ پنجره تأیید ═══════════════════════════════ -->
+<div class="modal-veil hidden" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">تأیید</h3>
+    <p id="modal-text"></p>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="modal-yes">بله</button>
+      <button class="btn" id="modal-no">انصراف</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

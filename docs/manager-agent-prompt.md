@@ -26,7 +26,7 @@
 |---|---|---|
 | **ایجنت مادر** | یک ایجنت دیگر (توسط انسان هدایت می‌شود) | سورس برنامه ویندوز (`app.py`، `run.bat`) را می‌نویسد و نسخه می‌دهد |
 | **ایجنت همکار** | یک ایجنت دیگر | فقط کد پایتون می‌نویسد و در ریپوی خودش پوش می‌کند |
-| **پنل ویندوز** | برنامه دسکتاپ pygame روی کامپیوتر کاربر | کدهای همکار را می‌گیرد، در `Desktop\CODES` می‌گذارد، اجرا می‌کند، نتیجه را در گوگل درایو می‌نویسد |
+| **پنل ویندوز** | برنامه دسکتاپ ویندوز (پنجره‌ی وب با pywebview) | کدهای همکار را می‌گیرد، در `Desktop\CODES` می‌گذارد، اجرا می‌کند، نتیجه را در گوگل درایو می‌نویسد |
 | **تو (ایجنت مدیریت)** | این وب‌اپ | بر همه نظارت می‌کنی، اجرا را دوباره راه می‌اندازی، به همکار پرامپت می‌دهی |
 | **انسان مدیر** | کاربر نهایی | تو را مدیریت می‌کند، ریپوها را با GitHub Desktop کلون/پول می‌کند |
 
@@ -42,20 +42,21 @@
 owner  : soheylfriend-MAJIDgit
 repo   : Windows-Agent
 branch : arena/025c788f-windows-agent
-file   : version.txt   ← محتوای فعلی: 「1.5-1」
+file   : version.txt   ← محتوای فعلی: 「1.6-1」
 ```
 
 ساختار ریپو:
 
 ```
 Windows-Agent/
-├── app.py                    ← کل برنامه (یک فایل، حدود ۲۸۰۰ خط)
+├── app.py                    ← همه‌ی منطق + سرور محلی رابط (یک فایل، ~۱۷۰۰ خط)
 ├── run.bat                   ← نصب خودکار کتابخانه‌ها + اجرا
 ├── version.txt               ← نسخه (هر تغییر = نسخه جدید)
-├── requirements.txt          ← pygame، arabic-reshaper، python-bidi، Pillow
+├── requirements.txt          ← pywebview، Pillow
 ├── README.md
 ├── .gitignore
 ├── assets/
+│   ├── ui/                   ← index.html + style.css + app.js (ظاهر برنامه)
 │   ├── fonts/                ← وزیرمتن: Regular / Medium / SemiBold / Bold
 │   └── sounds/               ← click، toggle، open، run، success، error، shutter، tick، notify
 ├── tools/

@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher
+rem  Windows Agent launcher  (v1.6 — web UI with pywebview)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================
@@ -25,11 +25,9 @@ if not defined PY_CMD (
     exit /b 1
 )
 
-rem --- 2) required packages ------------------------------------------
+rem --- 2) required packages -------------------------------------------
 set "MISSING="
-%PY_CMD% -c "import pygame" >nul 2>nul || set "MISSING=!MISSING! pygame"
-%PY_CMD% -c "import arabic_reshaper" >nul 2>nul || set "MISSING=!MISSING! arabic-reshaper"
-%PY_CMD% -c "import bidi" >nul 2>nul || set "MISSING=!MISSING! python-bidi"
+%PY_CMD% -c "import webview" >nul 2>nul || set "MISSING=!MISSING! pywebview"
 %PY_CMD% -c "import PIL" >nul 2>nul || set "MISSING=!MISSING! Pillow"
 
 if defined MISSING (
@@ -48,15 +46,13 @@ if defined MISSING (
     )
     rem --- verify again
     set "STILL="
-    %PY_CMD% -c "import pygame" >nul 2>nul || set "STILL=!STILL! pygame"
-    %PY_CMD% -c "import arabic_reshaper" >nul 2>nul || set "STILL=!STILL! arabic-reshaper"
-    %PY_CMD% -c "import bidi" >nul 2>nul || set "STILL=!STILL! python-bidi"
+    %PY_CMD% -c "import webview" >nul 2>nul || set "STILL=!STILL! pywebview"
     %PY_CMD% -c "import PIL" >nul 2>nul || set "STILL=!STILL! Pillow"
     if defined STILL (
         echo.
         echo [ERROR] Could not install:!STILL!
         echo Run this command manually, then start again:
-        echo     %PY_CMD% -m pip install pygame arabic-reshaper python-bidi Pillow
+        echo     %PY_CMD% -m pip install pywebview Pillow
         echo.
         echo If you use a proxy ^(v2rayN^), make sure it is running.
         echo.
@@ -68,7 +64,24 @@ if defined MISSING (
     echo.
 )
 
-rem --- 3) run the GUI without a console window -----------------------
+rem --- 3) WebView2 Runtime (the browser engine of the window) ----------
+set "WEBVIEW2="
+reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>nul && set "WEBVIEW2=1"
+if not defined WEBVIEW2 reg query "HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>nul && set "WEBVIEW2=1"
+if not defined WEBVIEW2 reg query "HKCU\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>nul && set "WEBVIEW2=1"
+
+if not defined WEBVIEW2 (
+    echo.
+    echo ------------------------------------------------------------
+    echo   The "WebView2 Runtime" is missing.
+    echo   The window of the app needs it. Install it once from:
+    echo   https://developer.microsoft.com/microsoft-edge/webview2/
+    echo   Windows 11 and most updated Windows 10 already have it.
+    echo ------------------------------------------------------------
+    echo.
+)
+
+rem --- 4) run the GUI without a console window -------------------------
 set "PYW_EXE="
 for /f "delims=" %%i in ('%PY_CMD% -c "import sys,os;print(os.path.join(os.path.dirname(sys.executable),'pythonw.exe'))"') do set "PYW_EXE=%%i"
 
