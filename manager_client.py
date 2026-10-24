@@ -1,16 +1,27 @@
 # -*- coding: utf-8 -*-
-"""کلاینت پس‌زمینه‌ی اتصال Windows Agent به ایجنت مدیریت (Cloudflare Control Plane & Command Plane).
+"""کلاینت پس‌زمینه‌ی اتصال Windows Agent به ایجنت مدیریت (Cloudflare Control Plane & D1 Automations).
 
 این ماژول کاملاً مستقل از ``app.py`` و فقط با کتابخانه‌ی استاندارد پایتون نوشته شده است.
-وظایف:
+
+مرز امنیتی و قرارداد اتوماسیون‌ها:
+  - کدهای اتوماسیون (``job_*.py``) که از کاتالوگ Cloudflare D1 دریافت و اجرا می‌شوند،
+    تحت هیچ شرایطی مجاز به تغییر کد پایه Windows Agent (``app.py``, ``manager_client.py``, ``run.bat``)،
+    خواندن فایل کلید ``manager_secret.bin`` یا دست‌کاری فایل‌های شخصی خارج از حوزه‌ی کاری خود نیستند.
+  - کلید دائمی مدیریت (Bearer Key) و اسرار DPAPI هرگز در متغیرهای محیطی (Environment) زیرفرآیند
+    اتوماسیون قرار نمی‌گیرند.
+
+وظایف ماژول:
   ۱. ذخیره‌ی امن ``base_url`` و ``agent_key`` با Windows DPAPI در:
      ``%LOCALAPPDATA%\\Windows-Agent\\manager_secret.bin``
   ۲. ارسال Heartbeat بلافاصله پس از شروع و سپس هر ۳۰ ثانیه به ``POST /heartbeat``
-     همراه با ``capabilities.command_plane = True``
+     همراه با ``capabilities.command_plane = True`` و ``capabilities.d1_automations = True``
   ۳. بررسی تست اتصال هر ۵ ثانیه از ``GET /connection-test`` و پاسخ خودکار با
      ``expectedReply`` بدون تغییر (``سلام ایجنت مدیریت.``) به ``POST /connection-test``
-  ۴. دریافت فرمان‌های مجاز از ``POST /commands/claim`` (فقط ``run_arena_prompt`` و ``sync_and_run_job``)
-     با بررسی دقیق allowlist و مسیر ``Desktop\\CODES\\job_*.py``
+  ۴. دریافت فرمان‌های مجاز از ``POST /commands/claim``:
+     - ``run_automation``: دریافت مستقیم نسخه‌ی کد از کاتالوگ Cloudflare D1
+       (``GET /api/agent/automations/{automationId}/versions/{versionId}``)، بررسی دقیق SHA-256،
+       ذخیره در فضای کاری موقت مختص همان فرمان و اجرا بدون هیچ وابستگی به Git یا GitHub
+     - ``run_arena_prompt`` و ``sync_and_run_job``: حفظ سازگاری عقب‌رو برای Rollback
   ۵. رعایت سیاست محلی دستی/خودکار Windows Agent (گرفتن تأیید محلی در حالت دستی پیش از اجرا)
   ۶. اجرای زیرفرآیند در Process Group مستقل، خواندن غیرمسدودکننده‌ی stdout با نخ و صف جدا،
      پایش لغو (``GET /commands/{id}`` هر <= ۱.۵ ثانیه)، ``timeoutSeconds``، ``noProgressSeconds`` و
@@ -30,6 +41,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import signal
 import ssl
 import subprocess
@@ -53,9 +65,23 @@ HTTP_TIMEOUT = 5.0
 BACKOFF_STEPS = (5.0, 15.0, 30.0, 60.0)
 MAX_FEEDBACK_ATTEMPTS = 3
 
-ALLOWED_COMMAND_TYPES = frozenset({"run_arena_prompt", "sync_and_run_job"})
+ALLOWED_COMMAND_TYPES = frozenset({"run_automation", "run_arena_prompt", "sync_and_run_job"})
 FORBIDDEN_PAYLOAD_KEYS = frozenset({"shell", "cmd", "command", "script", "code", "executable", "args", "argv"})
+FORBIDDEN_ENV_KEYS = frozenset({
+    "AGENT_KEY",
+    "WAM_AGENT_KEY",
+    "MANAGER_AGENT_KEY",
+    "MANAGER_SECRET",
+    "AUTHORIZATION",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "CLOUDFLARE_API_TOKEN",
+})
+
 JOB_NAME_RE = re.compile(r"^job_[A-Za-z0-9_]+\.py$")
+AUTOMATION_ID_RE = re.compile(r"^auto_[A-Za-z0-9_-]{4,60}$")
+VERSION_ID_RE = re.compile(r"^av_[A-Za-z0-9_-]{4,60}$")
+SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 ARENA_REQUIRED_STAGES = (
     "policy_check",
@@ -106,6 +132,7 @@ def _resolve_state_dir() -> Path:
 STATE_DIR = _resolve_state_dir()
 SECRET_FILE = STATE_DIR / "manager_secret.bin"
 ACTIVE_COMMAND_FILE = STATE_DIR / "active_command.json"
+WORKSPACES_DIR = STATE_DIR / "cmd_workspaces"
 
 
 def utc_iso_now() -> str:
@@ -500,8 +527,16 @@ def _get_screenshots_dir() -> Path:
         return folder
 
 
+def _create_command_workspace(cmd_id: str) -> Path:
+    """ایجاد پوشه‌ی کاری موقت و ایزوله برای فرمان در ``%LOCALAPPDATA%\\Windows-Agent\\cmd_workspaces``."""
+    safe_cmd = re.sub(r"[^A-Za-z0-9_-]", "_", cmd_id or "cmd")[:60]
+    ws = (WORKSPACES_DIR / safe_cmd).resolve()
+    ws.mkdir(parents=True, exist_ok=True)
+    return ws
+
+
 def validate_command_security(cmd: dict, codes_dir: Path | None = None) -> tuple[bool, str, Path | None, str]:
-    """بررسی allowlist نوع فرمان، نبود فیلدهای اجرایی آزاد و قرار داشتن مسیر داخل ``Desktop\\CODES``.
+    """بررسی allowlist نوع فرمان، نبود فیلدهای اجرایی آزاد و صحت ساختار فرمان.
 
     خروجی: ``(ok, job_name, resolved_job_path, reject_reason)``
     """
@@ -534,6 +569,37 @@ def validate_command_security(cmd: dict, codes_dir: Path | None = None) -> tuple
 
     if not JOB_NAME_RE.match(job_name):
         return False, job_name, None, f"نام فایل «{job_name}» با الگوی مجاز job_*.py مطابقت ندارد."
+
+    if cmd_type == "run_automation":
+        auto_id = str(payload.get("automationId") or "").strip()
+        ver_id = str(payload.get("versionId") or "").strip()
+        ver_num = payload.get("version")
+        sha256_hex = str(payload.get("sourceSha256") or "").strip()
+        endpoint = str(payload.get("sourceEndpoint") or "").strip()
+        src_truth = str(payload.get("sourceOfTruth") or "cloudflare_d1").strip()
+
+        if not AUTOMATION_ID_RE.match(auto_id):
+            return False, job_name, None, "شناسه اتوماسیون (automationId) معتبر نیست."
+        if not VERSION_ID_RE.match(ver_id):
+            return False, job_name, None, "شناسه نسخه اتوماسیون (versionId) معتبر نیست."
+        if not isinstance(ver_num, int) or isinstance(ver_num, bool) or ver_num < 1:
+            return False, job_name, None, "شماره نسخه اتوماسیون (version) معتبر نیست."
+        if not SHA256_HEX_RE.match(sha256_hex):
+            return False, job_name, None, "فرمت هش SHA-256 کد اتوماسیون معتبر نیست."
+        if src_truth != "cloudflare_d1":
+            return False, job_name, None, f"منبع کد اتوماسیون ({src_truth}) مجاز نیست؛ فقط cloudflare_d1 پذیرفته می‌شود."
+        expected_endpoint = f"/api/agent/automations/{auto_id}/versions/{ver_id}"
+        if (
+            not endpoint.startswith("/api/agent/automations/")
+            or "://" in endpoint
+            or endpoint.startswith("//")
+            or ".." in endpoint
+            or "\\" in endpoint
+            or "?" in endpoint
+            or "#" in endpoint
+            or endpoint != expected_endpoint
+        ):
+            return False, job_name, None, "آدرس sourceEndpoint غیرمجاز است؛ فقط مسیر نسبی دقیق اتوماسیون در D1 مجاز است."
 
     base_codes = (codes_dir or _get_codes_dir()).resolve()
     candidate = (base_codes / job_name).resolve()
@@ -569,7 +635,6 @@ def _get_process_start_marker(pid: int) -> float | None:
             if not ok:
                 return None
             ticks = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
-            # تبدیل Windows FILETIME (100ns از 1601-01-01) به ثانیه‌ی یونیکس
             return (ticks - 116444736000000000) / 10_000_000.0
         finally:
             _kernel32.CloseHandle(handle)
@@ -618,14 +683,18 @@ def is_tracked_process_alive(pid: int, expected_marker: float | None) -> bool:
     return True
 
 
-def spawn_job_process(job_path: Path, codes_dir: Path) -> subprocess.Popen:
-    """اجرای فایل کار در Process Group مستقل بدون پنجره‌ی مزاحم."""
-    env = dict(os.environ)
+def spawn_job_process(job_path: Path, cwd_dir: Path) -> subprocess.Popen:
+    """اجرای فایل کار در Process Group مستقل با محیط پاک‌سازی‌شده (بدون هیچ کلید مدیریتی)."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k.upper() not in FORBIDDEN_ENV_KEYS and not k.upper().startswith("WAM_AGENT_")
+    }
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
 
     kwargs: dict = {
-        "cwd": str(codes_dir),
+        "cwd": str(cwd_dir),
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "text": True,
@@ -692,7 +761,7 @@ _worker_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 _wake_event = threading.Event()
 _api_ref = None
-_confirm_handler = None  # قلاب قابل جایگزینی برای تست یا UI سفارشی
+_confirm_handler = None
 
 _answered_test_ids: set[str] = set()
 _active_command_id: str | None = None
@@ -764,7 +833,7 @@ def _refresh_secret_cache(api) -> dict | None:
 
 
 def _build_heartbeat_payload(api, agent_id: str) -> dict:
-    version = "1.7-5"
+    version = "1.7-6"
     commit = ""
     auto_mode = False
     busy = None
@@ -804,6 +873,7 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
             "open_report": True,
             "telegram_queue": True,
             "command_plane": True,
+            "d1_automations": True,
         },
         "state": {
             "auto_mode": auto_mode,
@@ -834,7 +904,7 @@ def _extract_error_code(data: dict) -> str:
 
 
 def send_heartbeat_once(api, cfg: dict | None = None) -> tuple[bool, int, dict]:
-    """ارسال یک Heartbeat به ``POST /heartbeat`` همراه با ``command_plane=True``."""
+    """ارسال یک Heartbeat به ``POST /heartbeat`` همراه با ``command_plane=True`` و ``d1_automations=True``."""
     cfg = cfg or _refresh_secret_cache(api)
     if not cfg:
         return False, 0, {"error": "کلید تنظیم نشده است"}
@@ -994,7 +1064,6 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         return
 
     if pid > 0 and is_tracked_process_alive(pid, marker):
-        # فرآیند قبلی واقعاً زنده است؛ کورکورانه دوباره اجرا نمی‌کنیم
         return
 
     base_url = cfg["base_url"]
@@ -1095,7 +1164,6 @@ class _CommandSession:
         if take_shot or stage in OBSERVABLE_SCREENSHOT_STAGES:
             self.capture_stage_screenshot(stage)
 
-        # طبق قرارداد: بلافاصله پس از هر رخداد یا artifact کنترل فرمان بررسی شود
         self.poll_control()
         return ok
 
@@ -1172,7 +1240,6 @@ class _CommandSession:
                     saved_path = raw_path
                     target_name = raw_path.name
         except Exception:
-            # در محیط بدون صفحه‌نمایش یا خطای اسکرین‌شات، یک هشدار ثبت می‌شود
             saved_path = None
 
         if saved_path is None or not saved_path.exists():
@@ -1235,7 +1302,6 @@ def _ask_local_confirmation(session: _CommandSession, job_name: str) -> str:
         return "approved" if decision_box["approved"] else "rejected"
 
     if not IS_WINDOWS:
-        # در محیط تست غیر ویندوز بدون هندلر سفارشی، فقط در صورت auto تایید می‌شود
         return "rejected"
 
     decision_win: dict = {"done": False, "approved": False}
@@ -1281,8 +1347,121 @@ def _ask_local_confirmation(session: _CommandSession, job_name: str) -> str:
     return "approved" if decision_win["approved"] else "rejected"
 
 
+def _fetch_and_prepare_d1_automation(
+    api,
+    session: _CommandSession,
+    job_name: str,
+) -> tuple[str, Path | None, Path | None, str]:
+    """دریافت کد اتوماسیون از D1 API، راستی‌آزمایی SHA-256 و نوشتن در فضای کاری موقت فرمان (بدون Git).
+
+    خروجی: ``(status_tag, script_path, workspace_dir, error_reason)``
+    که ``status_tag`` یکی از ``"ok"`` | ``"rejected"`` | ``"failed"`` | ``"cancelled"`` است.
+    """
+    payload = session.payload
+    auto_id = str(payload.get("automationId") or "").strip()
+    ver_id = str(payload.get("versionId") or "").strip()
+    ver_num = int(payload.get("version") or 0)
+    expected_sha256 = str(payload.get("sourceSha256") or "").strip().lower()
+    endpoint = str(payload.get("sourceEndpoint") or "").strip()
+
+    session.emit_event(
+        "d1_source_fetch_started",
+        f"دریافت نسخه {ver_num} اتوماسیون {job_name} از کاتالوگ Cloudflare D1…",
+        level="info",
+        data={"automationId": auto_id, "versionId": ver_id, "version": ver_num},
+    )
+    if job_name == "job_arena.py":
+        session.emitted_stages.add("repository_sync_started")
+
+    if session.cancel_requested:
+        return "cancelled", None, None, "لغو توسط سایت مدیریت"
+
+    # ساخت آدرس کامل از روی sourceEndpoint نسبی تاییدشده
+    rel_after_agent = endpoint[len("/api/agent"):]
+    fetch_url = f"{session.base_url}{rel_after_agent}"
+
+    ok, code, data = _http_json("GET", fetch_url, session.agent_key, None, timeout=HTTP_TIMEOUT)
+    if not ok:
+        err_msg = _extract_error_message(data, code)
+        return "failed", None, None, f"دریافت کد اتوماسیون از D1 ناموفق بود ({err_msg})."
+
+    resp_auto_id = str(data.get("automationId") or "").strip()
+    resp_ver_id = str(data.get("versionId") or "").strip()
+    resp_ver_num = data.get("version")
+    resp_job_name = str(data.get("jobName") or "").strip()
+    resp_sha256 = str(data.get("sourceSha256") or "").strip().lower()
+    source_code = data.get("sourceCode")
+
+    if (
+        resp_auto_id != auto_id
+        or resp_ver_id != ver_id
+        or int(resp_ver_num or -1) != ver_num
+        or resp_job_name != job_name
+        or not JOB_NAME_RE.match(resp_job_name)
+    ):
+        return (
+            "rejected",
+            None,
+            None,
+            "مشخصات اتوماسیون/نسخه/نام فایل برگشتی از D1 با فرمان تطابق ندارد.",
+        )
+
+    if not isinstance(source_code, str) or not source_code.strip():
+        return "rejected", None, None, "متن کد Python برگشتی از D1 خالی یا نامعتبر است."
+
+    actual_sha256 = hashlib.sha256(source_code.encode("utf-8")).hexdigest().lower()
+    if resp_sha256 != expected_sha256 or actual_sha256 != expected_sha256:
+        return (
+            "rejected",
+            None,
+            None,
+            f"عدم تطابق SHA-256 کد اتوماسیون (انتظار: {expected_sha256[:12]}…، محاسبه‌شده: {actual_sha256[:12]}…).",
+        )
+
+    workspace_dir = _create_command_workspace(session.cmd_id)
+    script_path = (workspace_dir / job_name).resolve()
+    if script_path.parent != workspace_dir.resolve():
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "rejected", None, None, "مسیر فایل در فضای کاری موقت معتبر نیست."
+
+    script_bytes = source_code.encode("utf-8")
+    script_path.write_bytes(script_bytes)
+
+    # به‌روزرسانی کپی نمایشی در Desktop\CODES برای دیده‌شدن در کتابخانه کدها (بدون هیچ فایل کنار app.py)
+    try:
+        codes_dir = _get_codes_dir().resolve()
+        mirror_path = (codes_dir / job_name).resolve()
+        if mirror_path.parent == codes_dir:
+            mirror_path.write_bytes(script_bytes)
+            if api is not None:
+                try:
+                    api._scan_codes()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    session.emit_event(
+        "d1_source_verified",
+        f"کد {job_name} (نسخه {ver_num}) از D1 دریافت و صحت SHA-256 ({actual_sha256[:12]}…) تأیید شد.",
+        level="info",
+        data={
+            "automationId": auto_id,
+            "versionId": ver_id,
+            "version": ver_num,
+            "jobName": job_name,
+            "sourceSha256": actual_sha256,
+            "sizeBytes": len(script_bytes),
+        },
+    )
+    if job_name == "job_arena.py":
+        session.emitted_stages.add("repository_sync_finished")
+
+    return "ok", script_path, workspace_dir, ""
+
+
 def _sync_collab_repository(api, session: _CommandSession, job_name: str) -> tuple[bool, Path | None, str]:
-    """همگام‌سازی مخزن ایجنت همکار و ذخیره‌ی فایل‌های پایتون در ``Desktop\\CODES``."""
+    """همگام‌سازی مخزن ایجنت همکار (مسیر قدیمی Git-based برای سازگاری عقب‌رو)."""
     session.emit_event(
         "repository_sync_started",
         f"شروع دریافت آخرین نسخه‌ی مخزن ایجنت همکار برای {job_name}…",
@@ -1337,7 +1516,7 @@ def _sync_collab_repository(api, session: _CommandSession, job_name: str) -> tup
 
 
 def _advance_arena_stages_from_line(session: _CommandSession, line: str) -> None:
-    """تشخیص مرحله‌های ``run_arena_prompt`` از خروجی استاندارد ``job_arena.py`` با حفظ ترتیب."""
+    """تشخیص مرحله‌های ``job_arena.py`` از خروجی استاندارد با حفظ ترتیب."""
     ordered_before: dict[str, tuple[str, ...]] = {
         "arena_process_detected": (),
         "arena_window_ready": ("arena_process_detected",),
@@ -1374,7 +1553,7 @@ def _advance_arena_stages_from_line(session: _CommandSession, line: str) -> None
     detected: list[str] = []
     if "صفحه Arena در مرورگر باز شد" in line or "در حال باز کردن لینک Arena" in line:
         detected.append("arena_process_detected")
-    if "تمام‌صفحه" in line or "ARENA_MAXIMIZED" in line or "صبر " in line and "بارگذاری کامل صفحه" in line:
+    if "تمام‌صفحه" in line or "ARENA_MAXIMIZED" in line or ("صبر " in line and "بارگذاری کامل صفحه" in line):
         detected.append("arena_window_ready")
     if "کادر چت" in line and ("کلیک شد" in line or "پیدا" in line or "تشخیص" in line):
         detected.append("prompt_located")
@@ -1449,7 +1628,7 @@ def _deliver_bounded_failure_feedback(
 
 
 def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
-    """اجرای کامل یک فرمان ادعاشده طبق ماشین حالت و قوانین امنیتی."""
+    """اجرای کامل یک فرمان ادعاشده طبق ماشین حالت و قوانین امنیتی (D1 یا Git-legacy)."""
     global _active_command_id
     session = _CommandSession(api, cfg, cmd)
     cmd_id = session.cmd_id
@@ -1469,8 +1648,9 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         except Exception:
             pass
 
+    cmd_workspace: Path | None = None
     try:
-        # ۱. بررسی امنیتی allowlist و مسیر
+        # ۱. بررسی امنیتی allowlist، ساختار payload و مسیر
         codes_dir = _get_codes_dir()
         sec_ok, job_name, job_path, reject_reason = validate_command_security(cmd, codes_dir)
         if not sec_ok or job_path is None:
@@ -1495,9 +1675,9 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
 
         session.emit_event(
             "policy_check",
-            f"بررسی امنیتی و سیاست اجرا انجام شد (فایل: {job_name}، حالت محلی: {'خودکار' if auto_mode else 'دستی'}).",
+            f"بررسی امنیتی و سیاست اجرا انجام شد (نوع: {session.cmd_type}، فایل: {job_name}، حالت محلی: {'خودکار' if auto_mode else 'دستی'}).",
             level="info",
-            data={"jobName": job_name, "autoMode": auto_mode},
+            data={"commandType": session.cmd_type, "jobName": job_name, "autoMode": auto_mode},
         )
         if session.cancel_requested:
             session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان پیش از شروع لغو شد.")
@@ -1537,22 +1717,51 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 level="info",
             )
 
-        # ۳. همگام‌سازی مخزن ایجنت همکار
-        sync_ok, synced_path, sync_err = _sync_collab_repository(api, session, job_name)
-        if session.cancel_requested:
-            session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان حین همگام‌سازی لغو شد.")
-            with _lock:
-                _runtime_info["last_command_status"] = "cancelled"
-            return "cancelled"
-        if not sync_ok or synced_path is None:
-            session.emit_event("repository_sync_finished", sync_err, level="fatal", data={"autoStop": True})
-            session.update_state("failed", "repository_sync_finished", sync_err, error=sync_err)
-            with _lock:
-                _runtime_info["last_command_status"] = "failed"
-            return "failed"
+        # ۳. آماده‌سازی کد: مسیر جدید D1 (بدون Git) یا مسیر قدیمی همگام‌سازی مخزن
+        run_cwd = codes_dir
+        if session.cmd_type == "run_automation":
+            prep_status, synced_path, cmd_workspace, prep_err = _fetch_and_prepare_d1_automation(api, session, job_name)
+            if session.cancel_requested or prep_status == "cancelled":
+                session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان حین دریافت از D1 لغو شد.")
+                with _lock:
+                    _runtime_info["last_command_status"] = "cancelled"
+                return "cancelled"
+            if prep_status == "rejected":
+                session.emit_event("d1_hash_verification", prep_err, level="fatal", data={"autoStop": True})
+                session.update_state(
+                    "rejected",
+                    "d1_hash_verification",
+                    prep_err,
+                    error=prep_err,
+                    result={"rejected": True, "reason": prep_err},
+                )
+                with _lock:
+                    _runtime_info["last_command_status"] = "rejected"
+                return "rejected"
+            if prep_status != "ok" or synced_path is None:
+                session.emit_event("d1_source_fetch_started", prep_err, level="fatal", data={"autoStop": True})
+                session.update_state("failed", "d1_source_fetch_started", prep_err, error=prep_err)
+                with _lock:
+                    _runtime_info["last_command_status"] = "failed"
+                return "failed"
+            if cmd_workspace is not None:
+                run_cwd = cmd_workspace
+        else:
+            sync_ok, synced_path, sync_err = _sync_collab_repository(api, session, job_name)
+            if session.cancel_requested:
+                session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان حین همگام‌سازی لغو شد.")
+                with _lock:
+                    _runtime_info["last_command_status"] = "cancelled"
+                return "cancelled"
+            if not sync_ok or synced_path is None:
+                session.emit_event("repository_sync_finished", sync_err, level="fatal", data={"autoStop": True})
+                session.update_state("failed", "repository_sync_finished", sync_err, error=sync_err)
+                with _lock:
+                    _runtime_info["last_command_status"] = "failed"
+                return "failed"
 
         # ۴. شروع فرآیند در Process Group مستقل
-        proc = spawn_job_process(synced_path, codes_dir)
+        proc = spawn_job_process(synced_path, run_cwd)
         pid = int(proc.pid)
         start_marker = _get_process_start_marker(pid)
         started_mono = time.monotonic()
@@ -1591,9 +1800,9 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         last_control_poll = time.monotonic()
         fatal_anomaly_reason: str | None = None
         timed_out_reason: str | None = None
+        is_arena_job = (session.cmd_type == "run_arena_prompt") or (job_name == "job_arena.py")
 
         while True:
-            # تخلیه‌ی خطوط آماده از صف بدون مسدود شدن
             drained = 0
             while drained < 40:
                 try:
@@ -1613,10 +1822,9 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 session.mark_progress()
 
                 clean_line = redact_sensitive(line, 1200)
-                if session.cmd_type == "run_arena_prompt":
+                if is_arena_job:
                     _advance_arena_stages_from_line(session, clean_line)
 
-                # تشخیص ناهنجاری یا خطای بحرانی در خروجی
                 if "ARENA_NO_BROWSER" in clean_line and "arena_process_detected" in session.emitted_stages:
                     fatal_anomaly_reason = "پنجره مرورگر Arena در میانه اجرا ناپدید شد."
                 elif "ARENA_TEXT_MISSING" in clean_line or "ARENA_SEND_UNCERTAIN" in clean_line:
@@ -1642,7 +1850,6 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             elapsed = now_mono - started_mono
             idle_secs = now_mono - session.last_progress_mono
 
-            # بررسی ساعت ۱: کل زمان اجرا (timeoutSeconds)
             if elapsed > session.timeout_seconds:
                 timed_out_reason = f"زمان اجرای فرمان از سقف مجاز ({int(session.timeout_seconds)} ثانیه) گذشت."
                 terminate_tree(proc, start_marker)
@@ -1655,7 +1862,6 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 )
                 break
 
-            # بررسی ساعت ۲: عدم پیشرفت (noProgressSeconds)
             if idle_secs > session.no_progress_seconds:
                 timed_out_reason = f"به مدت {int(session.no_progress_seconds)} ثانیه هیچ پیشرفتی از فرآیند ثبت نشد."
                 terminate_tree(proc, start_marker)
@@ -1668,7 +1874,6 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 )
                 break
 
-            # بررسی ساعت ۳: Poll کنترل لغو حداکثر هر ۱.۲ ثانیه (<= ۱.۵ ثانیه)
             if (now_mono - last_control_poll) >= RUNNING_CONTROL_POLL_INTERVAL:
                 session.poll_control()
                 last_control_poll = time.monotonic()
@@ -1691,7 +1896,6 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         duration_s = round(time.monotonic() - started_mono, 2)
         _clear_active_command_marker()
 
-        # ذخیره‌ی گزارش محلی اجرا در پوشه logs گوگل درایو (مشابه run_code_job)
         try:
             import app as _app
             dest_dir, _ = _app.resolve_report_dir()
@@ -1705,29 +1909,28 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         except Exception:
             pass
 
+        result_meta: dict = {
+            "exitCode": exit_code,
+            "durationSeconds": duration_s,
+            "jobName": job_name,
+        }
+        if session.cmd_type == "run_automation":
+            result_meta["automationId"] = session.payload.get("automationId")
+            result_meta["versionId"] = session.payload.get("versionId")
+            result_meta["version"] = session.payload.get("version")
+            result_meta["sourceSha256"] = session.payload.get("sourceSha256")
+
         # ۶. تعیین وضعیت نهایی و ثبت در D1
         if session.cancel_requested or _stop_event.is_set():
             reason = session.cancel_reason or "توسط کاربر یا سایت مدیریت متوقف شد."
             session.emit_event("cancelled", f"فرآیند متوقف شد: {reason}", level="warning", take_shot=True)
-            session.update_state(
-                "cancelled",
-                "cancelled",
-                reason,
-                error=reason,
-                result={"exitCode": exit_code, "durationSeconds": duration_s},
-            )
+            session.update_state("cancelled", "cancelled", reason, error=reason, result=result_meta)
             with _lock:
                 _runtime_info["last_command_status"] = "cancelled"
             return "cancelled"
 
         if timed_out_reason:
-            session.update_state(
-                "timed_out",
-                "timed_out",
-                timed_out_reason,
-                error=timed_out_reason,
-                result={"exitCode": exit_code, "durationSeconds": duration_s},
-            )
+            session.update_state("timed_out", "timed_out", timed_out_reason, error=timed_out_reason, result=result_meta)
             with _lock:
                 _runtime_info["last_command_status"] = "timed_out"
             return "timed_out"
@@ -1742,21 +1945,20 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 take_shot=True,
             )
             fb_info = {}
-            if session.cmd_type == "run_arena_prompt":
+            if is_arena_job:
                 fb_info = _deliver_bounded_failure_feedback(session, job_name, err_msg, stdout_lines)
             session.update_state(
                 "failed",
                 "failed",
                 err_msg,
                 error=err_msg,
-                result={"exitCode": exit_code, "durationSeconds": duration_s, **fb_info},
+                result={**result_meta, **fb_info},
             )
             with _lock:
                 _runtime_info["last_command_status"] = "failed"
             return "failed"
 
-        # اگر اجرا موفق بود و از نوع run_arena_prompt است، اطمینان حاصل کن تمام مرحله‌های الزامی ثبت شده‌اند
-        if session.cmd_type == "run_arena_prompt":
+        if is_arena_job:
             for st in ARENA_REQUIRED_STAGES:
                 if st != "completed" and st not in session.emitted_stages:
                     session.emit_event(st, f"مرحله {st} تکمیل شد.", level="info", take_shot=True)
@@ -1765,14 +1967,14 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             "completed",
             f"اجرای {job_name} با موفقیت در {duration_s} ثانیه کامل شد.",
             level="info",
-            data={"exitCode": 0, "durationSeconds": duration_s},
+            data=result_meta,
             take_shot=True,
         )
         session.update_state(
             "succeeded",
             "completed",
             f"فرمان {job_name} با موفقیت اجرا شد.",
-            result={"exitCode": 0, "durationSeconds": duration_s, "jobName": job_name},
+            result=result_meta,
         )
         with _lock:
             _runtime_info["last_command_status"] = "succeeded"
@@ -1784,6 +1986,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         return "succeeded"
 
     finally:
+        if cmd_workspace is not None:
+            shutil.rmtree(cmd_workspace, ignore_errors=True)
         _clear_active_command_marker()
         with _lock:
             _active_command_id = None
@@ -1927,7 +2131,6 @@ def _worker_loop() -> None:
                 auth_blocked = True
                 continue
             if status_c not in ("idle", "busy", "no_secret", "network_error"):
-                # بلافاصله پس از اتمام یک فرمان، Heartbeat تازه بفرست تا busy=None گزارش شود
                 last_hb = 0.0
 
         now2 = time.monotonic()
@@ -2004,6 +2207,7 @@ if __name__ == "__main__":
                     "base_url": cfg_now["base_url"] if cfg_now else DEFAULT_BASE_URL,
                     "key_prefix": mask_key(cfg_now["agent_key"]) if cfg_now else "",
                     "command_plane": True,
+                    "d1_automations": True,
                 },
                 ensure_ascii=False,
             )
