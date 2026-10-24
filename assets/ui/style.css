@@ -76,7 +76,11 @@ html[data-theme='dark'] {
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .18);
 }
 
-* { box-sizing: border-box; }
+*, *::before, *::after {
+  box-sizing: border-box;
+  user-select: text;
+  -webkit-user-select: text;
+}
 
 html, body { height: 100%; }
 
@@ -91,10 +95,19 @@ body {
   flex-direction: column;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
-  user-select: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-::selection { background: var(--accent-soft); }
+button, .tab, .subtab, .btn, th, td, label, span, p, div, code, pre, b, strong, em, time {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  color: var(--text);
+}
 
 /* ─────────────────────────────── هدر ─────────────────────────────── */
 
@@ -726,6 +739,7 @@ textarea:focus, select:focus {
   color: var(--text-dim);
 }
 .q-meta .err { color: var(--danger); }
+.q-meta .q-countdown { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
 .q-actions { display: flex; gap: 6px; flex: 0 0 auto; }
 .q-actions .btn { padding: 4px 10px; font-size: 12px; }
 

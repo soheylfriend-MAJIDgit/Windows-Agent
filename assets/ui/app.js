@@ -35,7 +35,9 @@
         'صف با فاصله‌ی امن پیام‌ها را می‌فرستد و اگر تلگرام محدودیت داد، خودش صبر می‌کند.',
         'در «گزارش زنده» دکمه‌ی «کپی همه» اضافه شد.',
         'فاصله‌ی دور خودکار از خود صفحه قابل تغییر است (پیش‌فرض ۱۰ ثانیه).',
-        'اگر گواهی امنیتی رد شود (فیلترشکن یا آنتی‌ویروس)، ارسال یک‌بار بدون بررسی گواهی تلاش می‌شود.'
+        'اگر گواهی امنیتی رد شود (فیلترشکن یا آنتی‌ویروس)، ارسال یک‌بار بدون بررسی گواهی تلاش می‌شود.',
+        'امکان انتخاب و کپی آزادانه‌ی متن از تمام بخش‌های صفحه (از جمله داخل تب‌ها، زیرتب‌ها و دکمه‌ها).',
+        'زمان‌بندی دقیق ربات تلگرام با فیلد scheduled_at (ISO 8601 با منطقه‌ی زمانی UTC و تهران) + تعریف صریح delay نسبت به لحظه ثبت + شمارش معکوس زنده و ویرایش پیام در صف.'
       ]
     },
     {
@@ -228,6 +230,31 @@
 
   /* ─────────────────────────────── ساعت و تاریخ ─────────────────────────────── */
 
+  function fmtCountdown(remSec) {
+    var s = Math.ceil(remSec);
+    if (s <= 0) return '⚡ در نوبت ارسال';
+    if (s < 60) return '⏳ ' + fa(s) + ' ثانیه دیگر';
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    if (h > 0) {
+      return '⏳ ' + fa(h) + ' ساعت و ' + fa(m) + ' دقیقه و ' + fa(sec) + ' ثانیه دیگر';
+    }
+    return '⏳ ' + fa(m) + ' دقیقه و ' + fa(sec) + ' ثانیه دیگر';
+  }
+
+  function updateQueueCountdowns() {
+    var nowSec = Date.now() / 1000;
+    Array.prototype.forEach.call(document.querySelectorAll('.q-countdown[data-send-at]'), function (el) {
+      var target = parseFloat(el.dataset.sendAt || '0');
+      if (!target) {
+        el.textContent = '⚡ در نوبت ارسال';
+        return;
+      }
+      el.textContent = fmtCountdown(target - nowSec);
+    });
+  }
+
   function tickClock() {
     var now = new Date();
     var hh = String(now.getHours()).padStart(2, '0');
@@ -237,6 +264,7 @@
     var j = g2j(now.getFullYear(), now.getMonth() + 1, now.getDate());
     var wd = WEEKDAYS[(now.getDay() + 1) % 7];
     $('date').textContent = wd + ' ' + fa(j[2]) + ' ' + MONTHS[j[1] - 1] + ' ' + fa(j[0]);
+    updateQueueCountdowns();
   }
 
   /* ─────────────────────────────── رندر ─────────────────────────────── */
@@ -553,16 +581,23 @@
     if (!botDirty) {
       setVal('bot-token', bot.token || '');
       setVal('bot-chat', bot.chat_id || '');
-      setVal('bot-gap', bot.gap || 3);
+      setVal('bot-gap', bot.gap !== undefined ? bot.gap : 1);
+      setVal('bot-missed-policy', bot.missed_policy || 'send');
       $('bot-enabled').checked = !!bot.enabled;
+    }
+
+    var tzBadge = $('bot-tz-badge');
+    if (tzBadge) {
+      var tehClock = (bot.now_tehran || '').slice(11, 19);
+      tzBadge.textContent = 'منطقه زمانی: تهران (UTC+03:30)' + (tehClock ? ' · اکنون ' + fa(tehClock) : '');
     }
 
     var title = $('bot-enabled-title');
     title.textContent = bot.enabled ? 'ربات روشن است' : 'ربات خاموش است';
     title.classList.toggle('on', !!bot.enabled);
     $('bot-enabled-hint').textContent = bot.enabled
-      ? 'پیام‌های صف با فاصله‌ی ' + fa(bot.gap) + ' ثانیه فرستاده می‌شوند.'
-      : 'پیام‌ها در صف می‌مانند تا روشنش کنی.';
+      ? 'پیام‌های سررسیدشده به ترتیب زمان مقرر (با دقت زیر ۱ ثانیه) فرستاده می‌شوند.'
+      : 'پیام‌ها روی دیسک در صف می‌مانند تا ربات را روشن کنی.';
 
     var meEl = $('bot-me');
     if (bot.me && bot.me.username) {
@@ -605,29 +640,46 @@
     }
 
     renderQueue(q);
+    updateQueueCountdowns();
   }
 
   function queueItemHtml(item) {
     var status = item.status || 'pending';
     var label = status === 'sent' ? 'فرستاده شد' : (status === 'failed' ? 'ناموفق' : 'در صف');
-    var when = item.send_at ? ('ساعت ' + fmtStamp(item.send_at)) : 'همین حالا';
+    var mode = item.mode || (item.send_at ? 'delay' : 'immediate');
+    var modeLabel = mode === 'scheduled_at' ? 'ساعت دقیق' : (mode === 'delay' ? 'با تأخیر' : 'فوری');
+
+    var targetStr = item.send_at_jalali
+      ? fa(item.send_at_jalali) + ' تهران'
+      : (item.send_at ? fmtStamp(item.send_at) : 'همین حالا');
+    var utcStr = item.scheduled_at_utc ? item.scheduled_at_utc.slice(11, 19) + ' UTC' : '';
+
     var meta = [
-      '<span>' + (item.created ? fmtStamp(item.created) : '') + '</span>',
-      '<span>' + esc(when) + '</span>',
+      '<span class="chip-line">' + label + ' (' + modeLabel + ')</span>',
+      '<span>ثبت: ' + (item.created ? fmtStamp(item.created) : '—') + '</span>',
+      '<span>موعد ارسال: <b>' + esc(targetStr) + '</b>' + (utcStr ? ' (' + esc(utcStr) + ')' : '') + '</span>',
       '<span>' + esc(item.source === 'api' ? 'از کد ایجنت همکار' : 'از پنل') + '</span>'
     ];
-    if (status === 'sent' && item.sent_at) meta.push('<span>فرستاده: ' + fmtStamp(item.sent_at) + '</span>');
-    if (item.error) meta.push('<span class="err">' + esc(item.error) + '</span>');
+    if (status === 'pending') {
+      meta.push('<span class="q-countdown" data-send-at="' + esc(item.send_at || 0) + '">…</span>');
+    }
+    if (status === 'sent' && item.sent_at) {
+      meta.push('<span>ارسال واقعی: ' + fmtStamp(item.sent_at) + '</span>');
+    }
+    if (item.error) {
+      meta.push('<span class="err">' + esc(item.error) + '</span>');
+    }
 
     var actions = '';
     if (status === 'pending') {
-      actions = '<button class="btn btn-ghost" type="button" data-qnow="' + esc(item.id) + '">ارسال فوری</button>';
+      actions += '<button class="btn btn-ghost" type="button" data-qnow="' + esc(item.id) + '">ارسال فوری</button>';
+      actions += '<button class="btn btn-ghost" type="button" data-qedit="' + esc(item.id) + '">ویرایش</button>';
     }
     actions += '<button class="btn btn-danger" type="button" data-qdel="' + esc(item.id) + '">حذف</button>';
 
-    return '<div class="queue-item ' + esc(status) + '">' +
+    return '<div class="queue-item ' + esc(status) + '" data-item-id="' + esc(item.id) + '">' +
       '<div class="q-main"><p>' + esc(item.text) + '</p>' +
-      '<div class="q-meta"><span class="chip-line">' + label + '</span>' + meta.join('') + '</div></div>' +
+      '<div class="q-meta">' + meta.join('') + '</div></div>' +
       '<div class="q-actions">' + actions + '</div>' +
       '</div>';
   }
@@ -642,17 +694,22 @@
     if (signature === sig.queue) return;
     sig.queue = signature;
 
-    var ordered = items.slice().reverse();
+    /* پیام‌های در انتظار بر اساس زمان ارسال، و بقیه از جدید به قدیم */
+    var pending = items.filter(function (i) { return i.status === 'pending'; })
+      .sort(function (a, b) { return (a.send_at || 0) - (b.send_at || 0); });
+    var others = items.filter(function (i) { return i.status !== 'pending'; }).reverse();
+    var ordered = pending.concat(others);
     list.innerHTML = ordered.map(queueItemHtml).join('');
   }
 
   function saveBotSettings() {
     var token = $('bot-token').value.trim();
     var chat = $('bot-chat').value.trim();
-    var gap = $('bot-gap').value.trim() || '3';
+    var gap = $('bot-gap').value.trim() || '1';
+    var policy = $('bot-missed-policy') ? $('bot-missed-policy').value : 'send';
     var enabled = $('bot-enabled').checked;
     botDirty = false;
-    call('save_bot', [token, chat, enabled, gap]).then(function (res) {
+    call('save_bot', [token, chat, enabled, gap, policy]).then(function (res) {
       handleResult(res, 'save_bot', null);
     });
   }
@@ -859,12 +916,38 @@
       });
     });
 
+    function updateScheduleInputs() {
+      var mode = $('bot-msg-mode').value;
+      $('bot-clock-wrap').classList.toggle('hidden', mode !== 'clock');
+      $('bot-delay-wrap').classList.toggle('hidden', mode !== 'delay');
+      if (mode === 'clock' && !$('bot-msg-clock').value) {
+        var d = new Date(Date.now() + 120000);
+        $('bot-msg-clock').value =
+          pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+      }
+    }
+
+    $('bot-msg-mode').addEventListener('change', updateScheduleInputs);
+
     $('bot-add').addEventListener('click', function () {
       var text = $('bot-text').value.trim();
       if (!text) { toast('متن پیام خالی است', 'error'); return; }
-      var delay = Number($('bot-msg-when').value || 0) * 60;
       var chat = $('bot-msg-chat').value.trim();
-      call('bot_add', [text, chat, delay]).then(function (res) {
+      var mode = $('bot-msg-mode').value;
+      var delay = null;
+      var scheduledAt = null;
+
+      if (mode === 'clock') {
+        scheduledAt = $('bot-msg-clock').value.trim();
+        if (!scheduledAt) { toast('ساعت دقیق ارسال را وارد کن', 'error'); return; }
+      } else if (mode === 'delay') {
+        delay = Number($('bot-msg-delay').value || 0);
+        if (delay < 0) { toast('تأخیر نمی‌تواند منفی باشد', 'error'); return; }
+      } else {
+        delay = 0;
+      }
+
+      call('bot_add', [text, chat, delay, scheduledAt]).then(function (res) {
         $('bot-text').value = '';
         handleResult(res, 'bot_add', null);
       });
@@ -876,12 +959,47 @@
       });
     });
 
+    $('bot-edit-cancel').addEventListener('click', function () {
+      $('bot-edit-card').classList.add('hidden');
+    });
+
+    $('bot-edit-save').addEventListener('click', function () {
+      var id = $('bot-edit-id').textContent.trim();
+      var text = $('bot-edit-text').value.trim();
+      var clockStr = $('bot-edit-clock').value.trim();
+      var delayRaw = $('bot-edit-delay').value.trim();
+      if (!text) { toast('متن پیام خالی است', 'error'); return; }
+      if (clockStr && delayRaw) {
+        toast('فقط یکی از ساعت دقیق یا تأخیر را پر کن', 'error');
+        return;
+      }
+      var delayVal = delayRaw !== '' ? Number(delayRaw) : null;
+      call('bot_edit_ui', [id, text, clockStr, delayVal]).then(function (res) {
+        $('bot-edit-card').classList.add('hidden');
+        handleResult(res, 'bot_edit_ui', null);
+      });
+    });
+
     $('bot-list').addEventListener('click', function (event) {
       var nowBtn = event.target.closest('[data-qnow]');
       if (nowBtn) {
         call('bot_set_send_at', [nowBtn.dataset.qnow]).then(function (res) {
           handleResult(res, 'bot_set_send_at', null);
         });
+        return;
+      }
+      var editBtn = event.target.closest('[data-qedit]');
+      if (editBtn) {
+        var itemId = editBtn.dataset.qedit;
+        var q = (state && state.bot && state.bot.queue) || [];
+        var found = q.filter(function (x) { return x.id === itemId; })[0];
+        if (!found) return;
+        $('bot-edit-id').textContent = found.id;
+        $('bot-edit-text').value = found.text || '';
+        $('bot-edit-clock').value = found.scheduled_at_tehran || '';
+        $('bot-edit-delay').value = '';
+        $('bot-edit-card').classList.remove('hidden');
+        $('bot-edit-text').focus();
         return;
       }
       var delBtn = event.target.closest('[data-qdel]');
@@ -901,6 +1019,10 @@
 
     $('copy-guide').addEventListener('click', function () {
       copyText($('guide-code').textContent, 'کد کپی شد');
+    });
+
+    $('copy-guide-all').addEventListener('click', function () {
+      copyText($('guide-full-card').innerText, 'کل راهنما کپی شد');
     });
 
     /* میان‌بر پوشه‌ها */

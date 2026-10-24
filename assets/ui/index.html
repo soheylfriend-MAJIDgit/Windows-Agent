@@ -210,15 +210,21 @@
         <h2>تنظیمات ربات تلگرام</h2>
         <p class="muted small">توکن را از <b>@BotFather</b> بگیر. ربات را عضو گروه کن (یا ادمینش کن) و مقصد را بگذار.</p>
 
-        <div class="fields">
+        <div class="fields two">
           <label><span>توکن ربات</span>
             <input id="bot-token" data-bot-field="token" dir="ltr" spellcheck="false" placeholder="123456789:AA...">
           </label>
           <label><span>مقصد — chat_id گروه</span>
             <input id="bot-chat" data-bot-field="chat" dir="ltr" spellcheck="false" placeholder="-1001234567890">
           </label>
-          <label><span>فاصله بین دو پیام (ثانیه)</span>
-            <input id="bot-gap" data-bot-field="gap" dir="ltr" inputmode="numeric" placeholder="۳">
+          <label><span>فاصله بین دو پیام فوری (ثانیه)</span>
+            <input id="bot-gap" data-bot-field="gap" dir="ltr" inputmode="numeric" placeholder="۱">
+          </label>
+          <label><span>سیاست پیام‌های زمان‌گذشته در زمان خاموشی</span>
+            <select id="bot-missed-policy" data-bot-field="missed_policy">
+              <option value="send">ارسال به ترتیب پس از روشن شدن (پیش‌فرض)</option>
+              <option value="expire">منقضی کردن پیام‌های زمان‌گذشته (بیش از ۱ دقیقه تأخیر)</option>
+            </select>
           </label>
         </div>
 
@@ -240,8 +246,8 @@
         </div>
 
         <div class="note-box">
-          <p>صف و تنظیمات در <code id="bot-api-file">%LOCALAPPDATA%\Windows-Agent</code> ذخیره می‌شود؛ هیچ فایلی کنار برنامه نوشته نمی‌شود.</p>
-          <p>پیام‌ها با فاصله فرستاده می‌شوند تا تلگرام محدودمان نکند. اگر تلگرام بگوید «زیاد صبر کن»، خودش صبر می‌کند و بعد ادامه می‌دهد.</p>
+          <p>صف و تنظیمات در <code id="bot-api-file">%LOCALAPPDATA%\Windows-Agent</code> ذخیره می‌شود (پایدار روی دیسک و مقاوم به ری‌استارت)؛ هیچ فایلی کنار برنامه نوشته نمی‌شود.</p>
+          <p>کارگر ارسال هر <b>۰.۲ ثانیه</b> صف را بررسی می‌کند تا پیام‌های زمان‌بندی‌شده با دقت حداکثر ۱ ثانیه و دقیقاً به ترتیب زمان مقرر ارسال شوند.</p>
         </div>
       </article>
     </div>
@@ -274,29 +280,58 @@
     <!-- ── صف پیام‌ها ── -->
     <div class="subview" data-sub="queue">
       <article class="card">
-        <h2>افزودن پیام به صف</h2>
-        <p class="muted small">ایجنت همکار هم می‌تواند از راه کد پایتونش پیام در این صف بگذارد — راهنمایش در زیرتب «راهنمای ایجنت همکار» است.</p>
+        <div class="head-card">
+          <div>
+            <h2>افزودن پیام به صف</h2>
+            <p class="muted small">امکان ارسال فوری، با تأخیر نسبت به لحظه ثبت (<code>delay</code>) یا در ساعت دقیق (<code>scheduled_at</code>).</p>
+          </div>
+          <span class="chip accent" id="bot-tz-badge">منطقه زمانی: تهران (UTC+03:30)</span>
+        </div>
 
         <textarea id="bot-text" rows="3" spellcheck="false" placeholder="متن پیام…"></textarea>
 
-        <div class="fields two">
+        <div class="fields">
           <label><span>مقصد (اختیاری)</span>
             <input id="bot-msg-chat" dir="ltr" spellcheck="false" placeholder="از تنظیمات">
           </label>
-          <label><span>زمان ارسال</span>
-            <select id="bot-msg-when">
-              <option value="0">همین حالا</option>
-              <option value="5">۵ دقیقه بعد</option>
-              <option value="30">۳۰ دقیقه بعد</option>
-              <option value="60">۱ ساعت بعد</option>
-              <option value="180">۳ ساعت بعد</option>
+          <label><span>شیوه زمان‌بندی</span>
+            <select id="bot-msg-mode">
+              <option value="immediate">همین حالا (فوری — delay=0)</option>
+              <option value="clock">ساعت دقیق (scheduled_at به وقت تهران)</option>
+              <option value="delay">با تأخیر از لحظه ثبت (delay به ثانیه)</option>
             </select>
+          </label>
+          <label id="bot-clock-wrap" class="hidden"><span>ساعت دقیق ارسال (تهران UTC+03:30)</span>
+            <input id="bot-msg-clock" type="time" step="1" dir="ltr">
+          </label>
+          <label id="bot-delay-wrap" class="hidden"><span>تأخیر نسبت به لحظه ثبت (ثانیه)</span>
+            <input id="bot-msg-delay" type="number" min="1" max="604800" step="1" value="60" dir="ltr">
           </label>
         </div>
 
         <div class="row-actions">
           <button class="btn btn-primary" id="bot-add">افزودن به صف</button>
           <span class="muted small" id="bot-counts"></span>
+        </div>
+      </article>
+
+      <!-- کادر ویرایش پیام در صف -->
+      <article class="card hidden" id="bot-edit-card">
+        <div class="head-card">
+          <h2>ویرایش پیام در صف (<span id="bot-edit-id">—</span>)</h2>
+          <button class="btn btn-ghost small-btn" id="bot-edit-cancel" type="button">انصراف</button>
+        </div>
+        <textarea id="bot-edit-text" rows="3" spellcheck="false"></textarea>
+        <div class="fields two">
+          <label><span>تغییر به ساعت دقیق تهران (اختیاری — HH:MM:SS یا ISO)</span>
+            <input id="bot-edit-clock" dir="ltr" spellcheck="false" placeholder="مثلاً 14:00:00 یا 2026-10-24T14:00:00+03:30">
+          </label>
+          <label><span>یا تأخیر از الان به ثانیه (اختیاری)</span>
+            <input id="bot-edit-delay" type="number" min="0" step="1" dir="ltr" placeholder="مثلاً 60">
+          </label>
+        </div>
+        <div class="row-actions">
+          <button class="btn btn-primary" id="bot-edit-save" type="button">ذخیره تغییرات</button>
         </div>
       </article>
 
@@ -317,51 +352,73 @@
 
     <!-- ── راهنمای ایجنت همکار ── -->
     <div class="subview" data-sub="guide">
-      <article class="card">
-        <h2>راهنمای ایجنت همکار</h2>
-        <p class="muted small">این متن را به ایجنت همکار بده. او با همین چند خط می‌تواند پیام بفرستد.</p>
+      <article class="card" id="guide-full-card">
+        <div class="head-card">
+          <div>
+            <h2>راهنمای فنی ایجنت همکار — قرارداد رسمی API صف تلگرام</h2>
+            <p class="muted small">تمام جزئیات زمان‌بندی با ساعت دقیق (<code>scheduled_at</code>) و تأخیر نسبی (<code>delay</code>) و ساختار پاسخ سرور.</p>
+          </div>
+          <button class="btn btn-ghost small-btn" id="copy-guide-all" type="button">کپی کل راهنما</button>
+        </div>
 
         <ol class="steps">
-          <li>پنل ویندوز باز باشد (ربات در همان برنامه کار می‌کند).</li>
-          <li>توکن و مقصد در زیرتب «تنظیمات» ذخیره شده باشد.</li>
-          <li>آدرس و کلید محلی در فایل <code id="guide-api-file">%LOCALAPPDATA%\Windows-Agent\bot_api.json</code> است؛ کد همیشه اول همان را می‌خواند — هیچ آدرسی را دستی ننویس.</li>
-          <li>پیام یا فوری فرستاده می‌شود (<code>delay=0</code>) یا در صف می‌ماند و بعداً می‌رود (<code>delay=ثانیه</code>). صف خودش با فاصله می‌فرستد.</li>
+          <li><b>فایل پیکربندی محلی:</b> آدرس‌ها و کلید احراز هویت در فایل <code id="guide-api-file">%LOCALAPPDATA%\Windows-Agent\bot_api.json</code> قرار دارد. کلیدهای موجود: <code>send</code>، <code>state</code>، <code>edit</code>، <code>delete</code> و <code>token</code> (هدر <code>X-Agent-Token</code>).</li>
+          <li><b>تعریف صریح <code>delay</code> (نسبی):</b> عدد به <b>ثانیه نسبت به لحظه‌ی ثبت همان پیام در صف</b> (<code>send_at = created_at + delay</code>). به زمان پیام قبلی ربطی ندارد. <code>delay=0</code> یعنی ارسال فوری.</li>
+          <li><b>فیلد <code>scheduled_at</code> (ساعت دقیق):</b> رشته‌ی <b>ISO 8601 همراه منطقه‌ی زمانی</b> — هم به وقت تهران (مثلاً <code>"2026-10-24T14:00:00+03:30"</code>) و هم به وقت UTC (مثلاً <code>"2026-10-24T10:30:00Z"</code>) و هم ساعت روز تهران (مثلاً <code>"14:00:00"</code>).</li>
+          <li><b>قوانین خطا (HTTP 400):</b>
+            ارسال هم‌زمان <code>delay</code> و <code>scheduled_at</code> خطای <code>400</code> با کد <code>CONFLICTING_SCHEDULE_FIELDS</code> برمی‌گرداند. ارسال زمان گذشته در <code>scheduled_at</code> خطای <code>400</code> با کد <code>PAST_SCHEDULED_TIME</code> (همراه <code>now_tehran</code> و <code>now_utc</code>) و <code>delay</code> منفی خطای <code>NEGATIVE_DELAY</code> برمی‌گرداند.</li>
+          <li><b>پاسخ سرور برای راستی‌آزمایی:</b> سرور در پاسخ هر ثبت، ساعت قطعی ارسال را در فیلدهای <code>scheduled_at</code> (ISO تهران)، <code>scheduled_at_utc</code> (ISO UTC)، <code>send_at</code> (یونیکس UTC) و <code>send_at_jalali</code> (مثلاً <code>"1405/08/02 14:00:00"</code>) برمی‌گرداند.</li>
+          <li><b>دقت، ترتیب و پایداری:</b> صف به صورت UTC روی دیسک (<code>telegram_queue.json</code>) ذخیره می‌شود (مقاوم به ری‌استارت)، کارگر هر <code>0.2</code> ثانیه صف را بررسی می‌کند (دقت زیر ۱ ثانیه)، و پیام‌های سررسیدشده دقیقاً به ترتیب <code>(send_at, created)</code> ارسال می‌شوند.</li>
         </ol>
 
         <div class="code-block">
           <div class="code-head">
-            <span>کد آماده — در فایل .py خودت بگذار</span>
+            <span>کد آماده پایتون (پشتیبانی از scheduled_at و delay)</span>
             <button class="btn btn-ghost small-btn" id="copy-guide" type="button">کپی کد</button>
           </div>
 <pre id="guide-code">import json, os, urllib.request
 
-CFG = os.path.join(os.environ["LOCALAPPDATA"], "Windows-Agent", "bot_api.json")
+CFG = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Windows-Agent", "bot_api.json")
 
-def tell(text, delay=0, chat_id=None):
-    """پیام را به صف ربات تلگرام می‌دهد؛ delay=0 یعنی همین حالا."""
+def tell(text, delay=None, scheduled_at=None, chat_id=None):
+    """ثبت پیام در صف ربات تلگرام.
+    - فقط یکی از delay (ثانیه از لحظه ثبت) یا scheduled_at (ISO 8601 با منطقه زمانی) را بده.
+    - اگر هیچ‌کدام را ندهی، فوری (delay=0) ثبت می‌شود.
+    """
     with open(CFG, encoding="utf-8") as fh:
         cfg = json.load(fh)
-    body = json.dumps({"text": text, "delay": delay, "chat_id": chat_id}).encode("utf-8")
+    payload = {"text": text}
+    if chat_id:
+        payload["chat_id"] = chat_id
+    if scheduled_at is not None:
+        payload["scheduled_at"] = scheduled_at
+    elif delay is not None:
+        payload["delay"] = delay
+    else:
+        payload["delay"] = 0
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         cfg["send"], data=body, method="POST",
-        headers={"Content-Type": "application/json", "X-Agent-Token": cfg["token"]},
+        headers={"Content-Type": "application/json; charset=utf-8", "X-Agent-Token": cfg["token"]},
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 if __name__ == "__main__":
-    print(tell("سلام! این پیام از کد ایجنت همکار است."))
-    print(tell("یادآوری — ۱۰ دقیقه بعد", delay=600))</pre>
+    # ۱) زمان‌بندی با ساعت دقیق (ISO 8601 با منطقه زمانی تهران +03:30 یا UTC با Z)
+    r1 = tell("گزارش رأس ساعت ۱۴:۰۰", scheduled_at="2026-10-24T14:00:00+03:30")
+    print("ثبت شد — ساعت قطعی ارسال:", r1["scheduled_at"], "| جلالی:", r1["send_at_jalali"])
+
+    # ۲) زمان‌بندی با تأخیر نسبی از لحظه ثبت در صف (ثانیه)
+    r2 = tell("گزارش ۳۰ ثانیه بعد از ثبت", delay=30)
+    print("ثبت شد — ساعت قطعی ارسال:", r2["scheduled_at"], "| UTC:", r2["scheduled_at_utc"])</pre>
         </div>
 
         <div class="note-box">
-          <p><b>قواعد مهم:</b></p>
-          <p>• متن هر پیام حداکثر ۴۰۰۰ کاراکتر؛ بلندتر بود خودش کوتاه می‌شود.</p>
-          <p>• <code>delay</code> ثانیه است؛ برای زمان دقیق می‌توانی <code>when</code> (زمان یونیکس) بفرستی.</p>
-          <p>• جواب موفق: <code>{"ok": true, "id": "...", "queued": true}</code> — جواب خطا: <code>{"ok": false, "error": "..."}</code>.</p>
-          <p>• اگر فایل <code>bot_api.json</code> نبود یعنی پنل ویندوز باز نیست؛ آن را خطای واقعی حساب کن و در گزارش بنویس.</p>
-          <p>• وضعیت صف: همان آدرس با مسیر <code>/bot/state</code> و همان کلید.</p>
-          <p>• ربات فقط با فاصله‌ی تنظیم‌شده پیام می‌فرستد؛ پشت سر هم نریز.</p>
+          <p><b>نمونه پاسخ موفق سرور (HTTP 200):</b></p>
+          <p><code>{"ok": true, "id": "m...", "status": "pending", "queued": true, "mode": "scheduled_at", "created_at_utc": "2026-10-24T10:10:00Z", "created_at_tehran": "2026-10-24T13:40:00+03:30", "scheduled_at": "2026-10-24T14:00:00+03:30", "scheduled_at_utc": "2026-10-24T10:30:00Z", "scheduled_at_tehran": "2026-10-24T14:00:00+03:30", "send_at": 1792837800.0, "send_at_jalali": "1405/08/02 14:00:00", "delay_seconds": 1200.0}</code></p>
+          <p><b>ویرایش یا حذف پیام در صف با API:</b> ارسال POST به <code>cfg["edit"]</code> با <code>{"id": "m...", "text": "...", "scheduled_at": "..."}</code> یا به <code>cfg["delete"]</code> با <code>{"id": "m..."}</code>.</p>
         </div>
       </article>
     </div>

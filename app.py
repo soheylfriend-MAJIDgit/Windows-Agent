@@ -106,7 +106,8 @@ DEFAULT_SETTINGS = {
     "bot_token": "",         # توکن ربات از BotFather
     "bot_chat_id": "",       # گروهِ مقصد (مثلاً ‎-1001234567890)
     "bot_enabled": False,    # فرستادن صف روشن/خاموش
-    "bot_gap": 3,            # فاصله‌ی بین دو پیام (ثانیه) تا تلگرام محدودمان نکند
+    "bot_gap": 1,            # فاصله‌ی بین دو پیام فوری (ثانیه)
+    "bot_missed_policy": "send",  # send = ارسال به ترتیب پس از روشن شدن | expire = منقضی کردن
     # مخزن ایجنت مادر (خود برنامه)
     "mother_owner": "soheylfriend-MAJIDgit",
     "mother_repo": "Windows-Agent",
@@ -861,10 +862,70 @@ def telegram_token_shape_ok(token: str) -> bool:
     return bool(re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", (token or "").strip()))
 
 
+def iso_utc(epoch: float) -> str:
+    """تبدیل زمان یونیکس به ISO 8601 با منطقه‌ی UTC (پسوند Z)."""
+    dt = datetime.fromtimestamp(float(epoch), timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def iso_tehran(epoch: float) -> str:
+    """تبدیل زمان یونیکس به ISO 8601 با منطقه‌ی تهران (+03:30)."""
+    dt = datetime.fromtimestamp(float(epoch), TEHRAN)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S+03:30")
+
+
+def jalali_epoch_str(epoch: float) -> str:
+    """تاریخ جلالی و ساعت دقیق به وقت تهران (برای نمایش و راستی‌آزمایی)."""
+    dt = datetime.fromtimestamp(float(epoch), TEHRAN)
+    return f"{jalali_date(dt)} {dt:%H:%M:%S}"
+
+
+def parse_scheduled_at(value) -> tuple[bool, float, str]:
+    """تبدیل مقدار scheduled_at به زمان یونیکس (UTC).
+
+    فرمت‌های مجاز:
+      - ISO 8601 همراه منطقه‌ی زمانی:
+          2026-10-24T14:00:00+03:30   یا   2026-10-24T10:30:00Z
+      - ساعت روز به وقت تهران (برای راحتی در رابط کاربری):
+          14:00   یا   14:00:30
+      - ISO 8601 بدون منطقه‌ی زمانی (به وقت تهران تفسیر می‌شود):
+          2026-10-24T14:00:00
+    """
+    raw = str(value if value is not None else "").strip()
+    if not raw:
+        return False, 0.0, "مقدار scheduled_at خالی است."
+
+    # حالت ساعت ساده: HH:MM یا HH:MM:SS (امروز به وقت تهران)
+    m_clock = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", raw)
+    if m_clock:
+        hh, mm, ss = int(m_clock.group(1)), int(m_clock.group(2)), int(m_clock.group(3) or 0)
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+            return False, 0.0, "ساعت واردشده معتبر نیست (باید بین 00:00:00 تا 23:59:59 باشد)."
+        now_teh = tehran_now()
+        target_dt = now_teh.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+        return True, target_dt.timestamp(), ""
+
+    # حالت ISO 8601 (با Z یا +HH:MM یا بدون افست)
+    norm = raw
+    if norm.endswith(("Z", "z")):
+        norm = norm[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(norm)
+    except ValueError:
+        return (
+            False,
+            0.0,
+            "فرمت scheduled_at نامعتبر است؛ از ISO 8601 همراه منطقه زمانی استفاده کن "
+            "(مثلاً 2026-10-24T14:00:00+03:30 یا 2026-10-24T10:30:00Z).",
+        )
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TEHRAN)
+    return True, dt.timestamp(), ""
+
+
 def write_bot_api_file(port: int, token: str) -> None:
     """آدرس و کلید محلی ربات را می‌نویسد تا کدهای ایجنت همکار بخوانند."""
-    import json
-
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         BOT_API_FILE.write_text(
@@ -874,7 +935,10 @@ def write_bot_api_file(port: int, token: str) -> None:
                     "token": token,
                     "send": f"http://127.0.0.1:{port}/bot/send",
                     "state": f"http://127.0.0.1:{port}/bot/state",
-                    "hint": "X-Agent-Token را در هدر بفرست",
+                    "edit": f"http://127.0.0.1:{port}/bot/edit",
+                    "delete": f"http://127.0.0.1:{port}/bot/delete",
+                    "timezone": "Asia/Tehran (UTC+03:30)",
+                    "hint": "X-Agent-Token را در هدر بفرست. برای زمان‌بندی از delay (ثانیه از لحظه ثبت) یا scheduled_at (ISO 8601) استفاده کن.",
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1217,7 +1281,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         """فقط برای ایجنت همکار: گذاشتن پیام در صف ربات تلگرام."""
         path = self.path.split("?", 1)[0]
-        if path not in ("/bot/send", "/bot/state"):
+        if path not in ("/bot/send", "/bot/state", "/bot/edit", "/bot/delete"):
             self._send(404, b"not found", "text/plain; charset=utf-8")
             return
 
@@ -1256,10 +1320,31 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **api.bot_queue_state()})
             return
 
+        if path == "/bot/delete":
+            item_id = str(payload.get("id") or "").strip()
+            if not item_id:
+                self._send_json(400, {"ok": False, "error": "شناسه پیام (id) لازم است"})
+                return
+            removed = api.bot_delete_by_id(item_id)
+            self._send_json(200 if removed else 404, {"ok": removed, "id": item_id})
+            return
+
+        if path == "/bot/edit":
+            result = api.bot_edit(
+                item_id=str(payload.get("id") or "").strip(),
+                text=payload.get("text"),
+                chat_id=payload.get("chat_id"),
+                delay=payload.get("delay"),
+                scheduled_at=payload.get("scheduled_at"),
+            )
+            self._send_json(200 if result.get("ok") else 400, result)
+            return
+
         result = api.bot_enqueue(
             text=payload.get("text"),
             chat_id=payload.get("chat_id"),
             delay=payload.get("delay"),
+            scheduled_at=payload.get("scheduled_at"),
             when=payload.get("when"),
             source="api",
         )
@@ -1472,18 +1557,40 @@ class Api:
     def _new_id(self) -> str:
         return f"m{int(time.time() * 1000) % 100000000}{len(self.queue) % 97:02d}"
 
+    def _enrich_item(self, item: dict) -> dict:
+        """فیلدهای زمانی استاندارد (UTC و تهران و جلالی) را روی آیتم تکمیل می‌کند."""
+        d = dict(item)
+        created = float(d.get("created") or time.time())
+        send_at = float(d.get("send_at") or 0.0)
+        eff = send_at if send_at > 0 else created
+        d.setdefault("mode", "immediate" if send_at == 0 else "delay")
+        d["created_at_utc"] = d.get("created_at_utc") or iso_utc(created)
+        d["created_at_tehran"] = d.get("created_at_tehran") or iso_tehran(created)
+        d["scheduled_at_utc"] = iso_utc(eff)
+        d["scheduled_at_tehran"] = iso_tehran(eff)
+        d["scheduled_at"] = d["scheduled_at_tehran"]
+        d["send_at_jalali"] = jalali_epoch_str(eff)
+        return d
+
     def bot_dict(self) -> dict:
         """وضعیت ربات برای صفحه."""
         token = str(self.settings.get("bot_token", "")).strip()
+        now = time.time()
         with self.q_lock:
-            items = [dict(item) for item in self.queue[-80:]]
+            items = [self._enrich_item(item) for item in self.queue[-100:]]
         return {
             "enabled": bool(self.settings.get("bot_enabled")),
             "token": token,
             "token_set": bool(token),
             "token_shape_ok": telegram_token_shape_ok(token),
             "chat_id": str(self.settings.get("bot_chat_id", "")).strip(),
-            "gap": int(self.settings.get("bot_gap") or 3),
+            "gap": int(self.settings.get("bot_gap") if self.settings.get("bot_gap") is not None else 1),
+            "missed_policy": str(self.settings.get("bot_missed_policy") or "send"),
+            "timezone": "Asia/Tehran (UTC+03:30)",
+            "now_epoch": round(now, 3),
+            "now_utc": iso_utc(now),
+            "now_tehran": iso_tehran(now),
+            "now_jalali": jalali_epoch_str(now),
             "me": self.bot_me,
             "last_test": self.bot_last_test,
             "queue": items,
@@ -1496,64 +1603,188 @@ class Api:
     def bot_queue_state(self) -> dict:
         """خلاصه‌ی صف برای کدهای ایجنت همکار."""
         counts = self._queue_counts()
+        now = time.time()
         with self.q_lock:
-            pending = [
-                {
-                    "id": item.get("id"),
-                    "created": item.get("created", 0),
-                    "send_at": item.get("send_at", 0),
-                    "preview": str(item.get("text", ""))[:60],
-                }
+            pending_items = [
+                self._enrich_item(item)
                 for item in self.queue if item.get("status") == "pending"
-            ][:50]
+            ]
+        pending_items.sort(key=lambda x: (float(x.get("send_at") or 0.0), float(x.get("created") or 0.0)))
+        pending = [
+            {
+                "id": item.get("id"),
+                "mode": item.get("mode", "delay"),
+                "created": item.get("created", 0),
+                "send_at": item.get("send_at", 0),
+                "scheduled_at": item.get("scheduled_at_tehran"),
+                "scheduled_at_utc": item.get("scheduled_at_utc"),
+                "scheduled_at_tehran": item.get("scheduled_at_tehran"),
+                "send_at_jalali": item.get("send_at_jalali"),
+                "preview": str(item.get("text", ""))[:60],
+            }
+            for item in pending_items[:50]
+        ]
         return {
             "enabled": bool(self.settings.get("bot_enabled")),
             "token_set": bool(str(self.settings.get("bot_token", "")).strip()),
             "chat_id_set": bool(str(self.settings.get("bot_chat_id", "")).strip()),
+            "timezone": "Asia/Tehran (UTC+03:30)",
+            "now_utc": iso_utc(now),
+            "now_tehran": iso_tehran(now),
             "counts": counts,
             "pending": pending,
         }
+
+    def _resolve_schedule(
+        self,
+        now: float,
+        delay=None,
+        scheduled_at=None,
+        when=None,
+    ) -> tuple[bool, float, str, dict]:
+        """محاسبه‌ی زمان قطعی ارسال (UTC epoch) با بررسی کامل قوانین خطا.
+
+        قوانین:
+          ۱) delay یعنی «ثانیه نسبت به لحظه‌ی ثبت در صف» (created_at + delay).
+          ۲) scheduled_at یعنی «ساعت دقیق ارسال» با فرمت ISO 8601 (UTC یا تهران) یا HH:MM(:SS).
+          ۳) ارسال هم‌زمان delay و scheduled_at مجاز نیست (خطای ۴۰۰).
+          ۴) زمان گذشته یا delay منفی مجاز نیست (خطای ۴۰۰).
+        """
+        has_delay = delay not in (None, "")
+        has_sched = scheduled_at not in (None, "") and str(scheduled_at).strip() != ""
+        has_when = when not in (None, "", 0, "0")
+
+        if (has_delay and has_sched) or (has_delay and has_when) or (has_sched and has_when):
+            return (
+                False,
+                0.0,
+                "",
+                {
+                    "ok": False,
+                    "error": "ارسال هم‌زمان delay و scheduled_at مجاز نیست؛ فقط یکی از آن‌ها را مشخص کن.",
+                    "error_code": "CONFLICTING_SCHEDULE_FIELDS",
+                },
+            )
+
+        if has_sched:
+            ok, target_epoch, err = parse_scheduled_at(scheduled_at)
+            if not ok:
+                return (
+                    False,
+                    0.0,
+                    "",
+                    {"ok": False, "error": err, "error_code": "INVALID_SCHEDULED_AT"},
+                )
+            if target_epoch < now - 1.0:
+                return (
+                    False,
+                    0.0,
+                    "",
+                    {
+                        "ok": False,
+                        "error": (
+                            f"زمان scheduled_at در گذشته است ({iso_tehran(target_epoch)}). "
+                            f"زمان فعلی تهران: {iso_tehran(now)}"
+                        ),
+                        "error_code": "PAST_SCHEDULED_TIME",
+                        "now_utc": iso_utc(now),
+                        "now_tehran": iso_tehran(now),
+                    },
+                )
+            return True, max(now, target_epoch), "scheduled_at", {}
+
+        if has_when:
+            try:
+                target_epoch = float(when)
+            except (TypeError, ValueError):
+                return (
+                    False,
+                    0.0,
+                    "",
+                    {"ok": False, "error": "مقدار when نامعتبر است.", "error_code": "INVALID_WHEN"},
+                )
+            if target_epoch < now - 1.0:
+                return (
+                    False,
+                    0.0,
+                    "",
+                    {
+                        "ok": False,
+                        "error": "زمان ارسال در گذشته است.",
+                        "error_code": "PAST_SCHEDULED_TIME",
+                        "now_utc": iso_utc(now),
+                        "now_tehran": iso_tehran(now),
+                    },
+                )
+            return True, max(now, target_epoch), "scheduled_at", {}
+
+        if has_delay:
+            try:
+                d = float(delay)
+            except (TypeError, ValueError):
+                return (
+                    False,
+                    0.0,
+                    "",
+                    {"ok": False, "error": "مقدار delay باید عدد (ثانیه) باشد.", "error_code": "INVALID_DELAY"},
+                )
+            if d < 0:
+                return (
+                    False,
+                    0.0,
+                    "",
+                    {"ok": False, "error": "مقدار delay نمی‌تواند منفی باشد.", "error_code": "NEGATIVE_DELAY"},
+                )
+            if d == 0:
+                return True, now, "immediate", {}
+            return True, now + d, "delay", {}
+
+        return True, now, "immediate", {}
 
     def bot_enqueue(
         self,
         text: str | None,
         chat_id: str | None = None,
         delay: float | None = None,
+        scheduled_at: str | None = None,
         when: float | None = None,
         source: str = "panel",
     ) -> dict:
         """گذاشتن یک پیام در صف. ایجنت همکار هم از همین راه استفاده می‌کند."""
         body = (text or "").strip()
         if not body:
-            return {"ok": False, "error": "متن پیام خالی است"}
+            return {"ok": False, "error": "متن پیام خالی است", "error_code": "EMPTY_TEXT"}
         if len(body) > TELEGRAM_TEXT_LIMIT:
             body = body[:TELEGRAM_TEXT_LIMIT] + "\n… (پیام کوتاه شد)"
 
         now = time.time()
-        send_at = 0.0
-        try:
-            if when not in (None, "", 0):
-                send_at = float(when)
-                if send_at <= now:
-                    send_at = 0.0
-            elif delay not in (None, "", 0):
-                send_at = now + max(0.0, float(delay))
-                if send_at <= now:
-                    send_at = 0.0
-        except (TypeError, ValueError):
-            return {"ok": False, "error": "زمان ارسال نامعتبر است"}
+        ok, send_at, mode, err_payload = self._resolve_schedule(
+            now, delay=delay, scheduled_at=scheduled_at, when=when
+        )
+        if not ok:
+            return err_payload
 
         with self.q_lock:
             if sum(1 for i in self.queue if i.get("status") == "pending") >= BOT_MAX_QUEUE:
-                return {"ok": False, "error": "صف پر است؛ اول پیام‌های قدیمی را پاک کن"}
+                return {"ok": False, "error": "صف پر است؛ اول پیام‌های قدیمی را پاک کن", "error_code": "QUEUE_FULL"}
             item = {
                 "id": self._new_id(),
                 "text": body,
                 "chat_id": str(chat_id or "").strip(),
+                "mode": mode,
                 "created": round(now, 3),
                 "send_at": round(send_at, 3),
+                "created_at_utc": iso_utc(now),
+                "created_at_tehran": iso_tehran(now),
+                "scheduled_at": iso_tehran(send_at),
+                "scheduled_at_utc": iso_utc(send_at),
+                "scheduled_at_tehran": iso_tehran(send_at),
+                "send_at_jalali": jalali_epoch_str(send_at),
+                "delay_seconds": round(max(0.0, send_at - now), 3),
                 "status": "pending",
                 "sent_at": 0.0,
+                "sent_at_utc": "",
+                "sent_at_tehran": "",
                 "error": "",
                 "source": source,
             }
@@ -1561,7 +1792,11 @@ class Api:
         self._save_queue()
 
         first_line = body.splitlines()[0][:48]
-        when_text = "همین حالا" if send_at == 0 else f"ساعت {time.strftime('%H:%M:%S', time.localtime(send_at))}"
+        when_text = (
+            "همین حالا"
+            if mode == "immediate"
+            else f"ساعت {datetime.fromtimestamp(send_at, TEHRAN):%H:%M:%S} تهران ({item['send_at_jalali']})"
+        )
         self.log(f"📥 پیام تازه در صف ربات ({source}) — {when_text}: {first_line}")
         if source != "api":
             self.toast("پیام به صف اضافه شد")
@@ -1569,25 +1804,141 @@ class Api:
             "ok": True,
             "id": item["id"],
             "status": "pending",
-            "send_at": send_at,
             "queued": True,
+            "mode": mode,
+            "created": item["created"],
+            "created_at": item["created_at_tehran"],
+            "created_at_utc": item["created_at_utc"],
+            "created_at_tehran": item["created_at_tehran"],
+            "send_at": item["send_at"],
+            "scheduled_at": item["scheduled_at_tehran"],
+            "scheduled_at_utc": item["scheduled_at_utc"],
+            "scheduled_at_tehran": item["scheduled_at_tehran"],
+            "send_at_jalali": item["send_at_jalali"],
+            "delay_seconds": item["delay_seconds"],
+            "timezone": "Asia/Tehran (UTC+03:30)",
             "note": "" if self.settings.get("bot_enabled") else "صف خاموش است؛ فقط ذخیره شد",
         }
 
-    def bot_add(self, text: str, chat_id: str = "", delay=0) -> dict:
+    def bot_add(
+        self,
+        text: str,
+        chat_id: str = "",
+        delay=None,
+        scheduled_at: str | None = None,
+    ) -> dict:
         """دکمه‌ی «افزودن به صف» در صفحه."""
-        result = self.bot_enqueue(text, chat_id, delay)
+        result = self.bot_enqueue(
+            text=text, chat_id=chat_id, delay=delay, scheduled_at=scheduled_at, source="panel"
+        )
         if not result.get("ok"):
             self.toast(result.get("error", "افزودن ممکن نشد"), "error")
         return self.get_state()
 
+    def bot_edit(
+        self,
+        item_id: str,
+        text: str | None = None,
+        chat_id: str | None = None,
+        delay=None,
+        scheduled_at: str | None = None,
+    ) -> dict:
+        """ویرایش متن یا زمان ارسال یک پیام در صف (فقط وقتی هنوز pending است)."""
+        if not item_id:
+            return {"ok": False, "error": "شناسه پیام لازم است"}
+
+        now = time.time()
+        new_send_at = None
+        new_mode = None
+        if delay not in (None, "") or (scheduled_at not in (None, "") and str(scheduled_at).strip() != ""):
+            ok, resolved_at, resolved_mode, err_payload = self._resolve_schedule(
+                now, delay=delay, scheduled_at=scheduled_at
+            )
+            if not ok:
+                return err_payload
+            new_send_at = round(resolved_at, 3)
+            new_mode = resolved_mode
+
+        updated_item = None
+        with self.q_lock:
+            for item in self.queue:
+                if item.get("id") != item_id:
+                    continue
+                if item.get("status") != "pending":
+                    return {"ok": False, "error": "فقط پیام‌های در انتظار قابل ویرایش هستند"}
+                if text is not None:
+                    clean_text = text.strip()
+                    if not clean_text:
+                        return {"ok": False, "error": "متن پیام نمی‌تواند خالی باشد"}
+                    item["text"] = clean_text[:TELEGRAM_TEXT_LIMIT]
+                if chat_id is not None:
+                    item["chat_id"] = str(chat_id).strip()
+                if new_send_at is not None and new_mode is not None:
+                    item["send_at"] = new_send_at
+                    item["mode"] = new_mode
+                    item["scheduled_at"] = iso_tehran(new_send_at)
+                    item["scheduled_at_utc"] = iso_utc(new_send_at)
+                    item["scheduled_at_tehran"] = iso_tehran(new_send_at)
+                    item["send_at_jalali"] = jalali_epoch_str(new_send_at)
+                    item["delay_seconds"] = round(max(0.0, new_send_at - now), 3)
+                item["error"] = ""
+                updated_item = self._enrich_item(item)
+                break
+
+        if updated_item is None:
+            return {"ok": False, "error": "پیام در صف پیدا نشد"}
+
+        self._save_queue()
+        self.log(f"✏️ پیام {item_id} ویرایش شد → ارسال: {updated_item['send_at_jalali']}")
+        return {
+            "ok": True,
+            "id": item_id,
+            "send_at": updated_item["send_at"],
+            "scheduled_at": updated_item["scheduled_at_tehran"],
+            "scheduled_at_utc": updated_item["scheduled_at_utc"],
+            "scheduled_at_tehran": updated_item["scheduled_at_tehran"],
+            "send_at_jalali": updated_item["send_at_jalali"],
+        }
+
+    def bot_edit_ui(
+        self,
+        item_id: str,
+        text: str,
+        scheduled_at: str = "",
+        delay=None,
+    ) -> dict:
+        """ویرایش پیام از داخل رابط کاربری."""
+        sched = scheduled_at.strip() if scheduled_at else None
+        d = delay if (sched is None and delay not in (None, "")) else None
+        res = self.bot_edit(item_id=item_id, text=text, delay=d, scheduled_at=sched)
+        if res.get("ok"):
+            self.toast("پیام ویرایش شد")
+        else:
+            self.toast(res.get("error", "ویرایش ممکن نشد"), "error")
+        return self.get_state()
+
+    def bot_delete_by_id(self, item_id: str) -> bool:
+        with self.q_lock:
+            before = len(self.queue)
+            self.queue = [item for item in self.queue if item.get("id") != item_id]
+            removed = len(self.queue) < before
+        if removed:
+            self._save_queue()
+        return removed
+
     def bot_set_send_at(self, item_id: str) -> dict:
-        """ارسال فوری: زمان پیام را صفر می‌کند."""
+        """ارسال فوری: زمان پیام را به لحظه‌ی حال تغییر می‌دهد."""
         found = False
+        now = round(time.time(), 3)
         with self.q_lock:
             for item in self.queue:
                 if item.get("id") == item_id and item.get("status") == "pending":
-                    item["send_at"] = 0.0
+                    item["send_at"] = now
+                    item["mode"] = "immediate"
+                    item["scheduled_at"] = iso_tehran(now)
+                    item["scheduled_at_utc"] = iso_utc(now)
+                    item["scheduled_at_tehran"] = iso_tehran(now)
+                    item["send_at_jalali"] = jalali_epoch_str(now)
                     item["error"] = ""
                     found = True
                     break
@@ -1598,9 +1949,7 @@ class Api:
         return self.get_state()
 
     def bot_remove(self, item_id: str) -> dict:
-        with self.q_lock:
-            self.queue = [item for item in self.queue if item.get("id") != item_id]
-        self._save_queue()
+        self.bot_delete_by_id(item_id)
         self.toast("پیام از صف حذف شد")
         return self.get_state()
 
@@ -1615,19 +1964,28 @@ class Api:
         self.toast("صف پاک شد")
         return self.get_state()
 
-    def save_bot(self, token: str, chat_id: str, enabled: bool, gap) -> dict:
+    def save_bot(
+        self,
+        token: str,
+        chat_id: str,
+        enabled: bool,
+        gap,
+        missed_policy: str = "send",
+    ) -> dict:
         """ذخیره‌ی تنظیمات ربات."""
         token = (token or "").strip()
         chat_id = str(chat_id or "").strip()
         try:
-            gap_i = max(1, min(60, int(float(gap))))
+            gap_i = max(0, min(60, int(float(gap))))
         except (TypeError, ValueError):
-            gap_i = 3
+            gap_i = 1
+        policy = "expire" if str(missed_policy).strip() == "expire" else "send"
 
         self.settings["bot_token"] = token
         self.settings["bot_chat_id"] = chat_id
         self.settings["bot_enabled"] = bool(enabled)
         self.settings["bot_gap"] = gap_i
+        self.settings["bot_missed_policy"] = policy
         save_settings(self.settings)
         if token and not telegram_token_shape_ok(token):
             self.toast("شکل توکن درست نیست (باید مثل 123456:ABC-... باشد)", "error")
@@ -1720,38 +2078,64 @@ class Api:
     # ------------------------------------------ کارگر ارسال صف ربات ---
 
     def _start_bot_worker(self) -> None:
+        """کارگر صف با دقت ۰.۲ ثانیه (زیر ۱ ثانیه) و حفظ ترتیب زمانی."""
         def loop() -> None:
             while not self._bot_stop.is_set():
                 try:
                     self._bot_tick()
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"⚠️ خطای کارگر ربات: {exc}")
-                self._bot_stop.wait(1.0)
+                self._bot_stop.wait(0.2)
 
         threading.Thread(target=loop, daemon=True).start()
 
     def _bot_tick(self) -> None:
-        """اگر ربات روشن باشد، نوبتی یک پیام از صف می‌فرستد."""
+        """اگر ربات روشن باشد، پیام‌های سررسیدشده را به ترتیب زمان مقرر می‌فرستد."""
         if not self.settings.get("bot_enabled"):
             return
         token = str(self.settings.get("bot_token", "")).strip()
         if not token:
             return
 
-        gap = max(1, int(self.settings.get("bot_gap") or 3))
         now = time.time()
-        if now - self._last_bot_send < gap:
-            return
+        missed_policy = str(self.settings.get("bot_missed_policy") or "send")
 
         with self.q_lock:
-            due = None
-            for item in self.queue:
-                if item.get("status") != "pending":
-                    continue
-                if not item.get("send_at") or item["send_at"] <= now:
-                    due = item
-                    break
+            # سیاست سیستم خاموش: اگر expire انتخاب شده و از زمان پیام زمان‌بندی‌شده بیش از ۶۰ ثانیه گذشته، منقضی کن
+            if missed_policy == "expire":
+                expired_any = False
+                for item in self.queue:
+                    if item.get("status") != "pending":
+                        continue
+                    send_at = float(item.get("send_at") or 0.0)
+                    if item.get("mode") == "scheduled_at" and send_at > 0 and (now - send_at) > 60.0:
+                        item["status"] = "failed"
+                        item["error"] = "منقضی شد (در زمان خاموشی زمان ارسال گذشت)"
+                        expired_any = True
+                if expired_any:
+                    self._save_queue()
+
+            # جمع‌آوری پیام‌های سررسیدشده و مرتب‌سازی دقیق بر اساس (send_at, created, id)
+            due_candidates = [
+                item for item in self.queue
+                if item.get("status") == "pending" and float(item.get("send_at") or 0.0) <= now
+            ]
+            due_candidates.sort(
+                key=lambda x: (
+                    float(x.get("send_at") or 0.0),
+                    float(x.get("created") or 0.0),
+                    str(x.get("id") or ""),
+                )
+            )
+            due = due_candidates[0] if due_candidates else None
+
         if due is None:
+            return
+
+        gap = max(0, int(self.settings.get("bot_gap") if self.settings.get("bot_gap") is not None else 1))
+        # برای پیام‌های زمان‌بندی‌شده با ساعت دقیق، دقت زیر ۱ ثانیه اولویت دارد
+        effective_gap = min(gap, 0.5) if due.get("mode") == "scheduled_at" else gap
+        if now - self._last_bot_send < effective_gap:
             return
 
         target = (due.get("chat_id") or str(self.settings.get("bot_chat_id", ""))).strip()
@@ -1771,18 +2155,21 @@ class Api:
             BOT_SEND_TIMEOUT,
         )
         self._note_tls(data)
+        sent_epoch = time.time()
         stamp = f"{tehran_now():%H:%M:%S}"
         if ok and data.get("ok"):
             due["status"] = "sent"
-            due["sent_at"] = time.time()
+            due["sent_at"] = round(sent_epoch, 3)
+            due["sent_at_utc"] = iso_utc(sent_epoch)
+            due["sent_at_tehran"] = iso_tehran(sent_epoch)
             due["error"] = ""
-            self.log(f"📨 پیام ربات فرستاده شد → {target} ({stamp})")
+            self.log(f"📨 پیام ربات فرستاده شد ({due.get('id')}) → {target} ({stamp})")
             self.emit("bot_sent", id=due.get("id"))
         else:
             desc = telegram_error_fa((data or {}).get("description") or "پاسخ نامعتبر")[:200]
             retry_after = ((data or {}).get("parameters") or {}).get("retry_after")
             if retry_after:
-                due["send_at"] = time.time() + float(retry_after)
+                due["send_at"] = round(time.time() + float(retry_after), 3)
                 due["error"] = f"محدودیت تلگرام — {retry_after} ثانیه صبر"
                 self.log(f"⏳ تلگرام محدودیت داد؛ {retry_after} ثانیه صبر می‌کنیم.")
             else:
@@ -2351,7 +2738,7 @@ def main() -> None:
         height=820,
         min_size=(900, 600),
         background_color="#161511",
-        text_select=False,
+        text_select=True,
         confirm_close=False,
         resizable=True,
     )
@@ -2370,7 +2757,11 @@ def main() -> None:
 
     def on_loaded() -> None:
         try:
-            window.evaluate_js("document.documentElement.dataset.ready='1';")
+            window.evaluate_js(
+                "document.documentElement.dataset.ready='1';"
+                "document.body.style.userSelect='text';"
+                "document.body.style.webkitUserSelect='text';"
+            )
         except Exception:
             pass
 
