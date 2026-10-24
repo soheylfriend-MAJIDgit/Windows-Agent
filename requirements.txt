@@ -1,1 +1,5 @@
+# رابط کاربری: پنجره‌ی WebView2 با HTML/CSS/JS
+pywebview>=5.0
+
+# گرفتن اسکرین‌شات
 Pillow>=9.0.0

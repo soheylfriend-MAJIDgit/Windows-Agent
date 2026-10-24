@@ -42,7 +42,7 @@
 owner  : soheylfriend-MAJIDgit
 repo   : Windows-Agent
 branch : arena/025c788f-windows-agent
-file   : version.txt   ← محتوای فعلی: 「1.7-3」
+file   : version.txt   ← محتوای فعلی: 「1.7-4」
 ```
 
 ساختار ریپو:
@@ -439,7 +439,7 @@ html[data-theme='dark'] {
 
 # بخش ۱۱ — پاسخ فنی ایجنت مادر به ۸ پرسش معماری ایجنت مدیریت
 
-این بخش مشخصات دقیق فنی نسخه‌ی فعلی (`1.7-3`) پنل ویندوز (`app.py`) را برای طراحی ماژول `background command client` (بدون دست‌کاری خودکار `app.py`) شرح می‌دهد:
+این بخش مشخصات دقیق فنی نسخه‌ی فعلی (`1.7-4`) پنل ویندوز (`app.py`) را برای طراحی ماژول `background command client` (بدون دست‌کاری خودکار `app.py`) شرح می‌دهد:
 
 ## ۱۱.۱ بهترین محل اضافه‌کردن Background Command Client (بدون تغییر خودکار `app.py`)
 دو الگوی تمیز و بدون دست‌کاری مستقیم هسته‌ی `app.py` وجود دارد:
