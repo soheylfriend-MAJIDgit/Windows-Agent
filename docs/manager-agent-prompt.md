@@ -433,3 +433,93 @@ html[data-theme='dark'] {
 5. **یک تست دستی** برای هر مسیر اصلی: خواندن ریپو، اجرای دوباره، ارسال پرامپت، خواندن نتیجه
 
 قبل از شروع، اگر جایی ابهام داشتی **بپرس**. لازم نیست حدس بزنی؛ همه‌ی آدرس‌ها و قالب‌ها در همین سند آمده است.
+
+
+---
+
+# بخش ۱۱ — پاسخ فنی ایجنت مادر به ۸ پرسش معماری ایجنت مدیریت
+
+این بخش مشخصات دقیق فنی نسخه‌ی فعلی (`1.7-3`) پنل ویندوز (`app.py`) را برای طراحی ماژول `background command client` (بدون دست‌کاری خودکار `app.py`) شرح می‌دهد:
+
+## ۱۱.۱ بهترین محل اضافه‌کردن Background Command Client (بدون تغییر خودکار `app.py`)
+دو الگوی تمیز و بدون دست‌کاری مستقیم هسته‌ی `app.py` وجود دارد:
+1. **الگوی ماژول اختیاری کنار برنامه (`manager_bridge.py`):**
+   - ایجنت مادر در صورت تأیید کاربر، یک بار فقط ۳ خط قلاب اختیاری (`try: import manager_bridge; manager_bridge.start(api) except ImportError: pass`) در انتهای `Api.__init__` می‌گذارد.
+   - کل منطق کلاینت در یک فایل مستقل یا از طریق پل محلی HTTP (`127.0.0.1:<port>`) کار می‌کند.
+2. **الگوی کاملاً بدون تغییر در `app.py` (استفاده از مکانیزم فعلی `Desktop\CODES` یا سرور محلی):**
+   - سرور محلی برنامه همین الان روی `127.0.0.1:<port>` بالا می‌آید و اطلاعات اتصال را در `%LOCALAPPDATA%\Windows-Agent\bot_api.json` می‌نویسد.
+   - اگر کلاینت به صورت یک اسکریپت یا سرویس کمکی جدا اجرا شود، می‌تواند از طریق فایل‌های وضعیت در `%LOCALAPPDATA%\Windows-Agent` و API محلی با پنل تعامل کند.
+
+## ۱۱.۲ چرخه‌ی اجرای برنامه و Threadهای موجود
+فرآیند اصلی (`main()`) در نخ اصلی (Main Thread) پنجره‌ی `pywebview` (موتور WebView2) را اجرا می‌کند. نخ‌های پس‌زمینه همگی `daemon=True` هستند:
+1. **نخ وب‌سرور محلی (`ThreadingHTTPServer`):** روی `127.0.0.1:0` (پورت آزاد تصادفی)، با `daemon_threads=True` برای سرو رابط کاربری (`/`, `/ui/*`, `/fonts/*`, `/sounds/*`, `/shots/*`) و API ربات تلگرام (`/bot/send`, `/bot/state`, `/bot/edit`, `/bot/delete`).
+2. **نخ پایش وضعیت (`_start_status_monitor`):** هر `STATUS_CHECK_SECONDS = 5` ثانیه وضعیت اینترنت (`check_internet` با سوکت به `1.1.1.1:53` و `8.8.8.8:53` با timeout `1.5s`) و وضعیت پوشه‌ی Google Drive را بررسی می‌کند.
+3. **نخ کارگر ربات تلگرام (`_start_bot_worker`):** هر `0.2` ثانیه (`_bot_stop.wait(0.2)`) صف پیام‌ها را بررسی و با رعایت قفل `self.q_lock` ارسال می‌کند.
+4. **نخ حلقه‌ی خودکار (`_arm_watch`):** فقط وقتی `settings["auto"] == True` باشد فعال است؛ هر `0.5` ثانیه چک می‌کند و هر `sync_seconds` (پیش‌فرض ۱۰ ثانیه، قابل تغییر بین ۳ تا ۶۰۰ ثانیه) در صورت خالی بودن `self.busy`، کار `_auto_cycle` را در یک نخ کارگر جدا اجرا می‌کند.
+5. **نخ کارگر عملیات (`_start_job`):** هر بار فقط یک عملیات سنگین (`self.busy != None`) در یک نخ موقت `daemon=True` اجرا می‌شود؛ قفل لاگ و رویدادها `self.lock` (`threading.Lock`) است.
+
+## ۱۱.۳ روش فعلی همگام‌سازی Google Drive
+برنامه از API ابری گوگل درایو استفاده **نمی‌کند**؛ بلکه به پوشه‌ی محلی **Google Drive for Desktop (`GoogleDriveFS.exe`)** می‌نویسد:
+- مسیر پایه: `DRIVE_BASE_DIR = r"C:\Users\alibatel\My Drive\Windows-Agent-DB"`
+- فقط و فقط دو زیرپوشه مجاز است:
+  1. `ScreenShots` (`C:\Users\alibatel\My Drive\Windows-Agent-DB\ScreenShots`)
+  2. `logs` (`C:\Users\alibatel\My Drive\Windows-Agent-DB\logs`) و زیرپوشه‌ی خطاها `logs\errors`
+- تابع `resolve_dir` ابتدا وجود مسیر روی درایو را چک می‌کند؛ اگر درایو قطع باشد، به صورت خودکار روی دسکتاپ (`Desktop\ScreenShots` و `Desktop\logs`) fallback می‌زند تا هیچ خروجی‌ای از دست نرود.
+
+## ۱۱.۴ محل امن ذخیره‌ی Secret با DPAPI
+- قانون مطلق پروژه: **هیچ فایلی نباید کنار `app.py` ذخیره شود.**
+- تمام داده‌های محلی فقط در `STATE_DIR = %LOCALAPPDATA%\Windows-Agent` (`C:\Users\<user>\AppData\Local\Windows-Agent`) قرار می‌گیرند.
+- برای ذخیره‌ی توکن‌ها یا کلیدهای حساس کلاینت مدیریت، بهترین مسیر `%LOCALAPPDATA%\Windows-Agent\secrets.bin` (یا فیلد رمزنگاری‌شده در `settings.json`) با استفاده از **Windows DPAPI (`CryptProtectData` / `CryptUnprotectData` از طریق `ctypes.windll.crypt32`)** بدون نیاز به هیچ پکیج نصبی بیرونی است، با محدوده `CRYPTPROTECT_UI_FORBIDDEN = 0x1` (مختص همان کاربر ویندوز).
+
+## ۱۱.۵ ساختار فعلی Job Runner و Timeoutها
+- تابع اجرایی: `run_code_job(path: Path) -> tuple[bool, str, str]`
+- دستور اجرا: `subprocess.run([sys.executable, str(path)], cwd=str(path.parent), capture_output=True, timeout=CODES_MAX_RUNTIME, env=env, creationflags=subprocess.CREATE_NO_WINDOW)`
+- متغیرهای محیطی اضافه‌شده: `PYTHONIOENCODING="utf-8"`, `PYTHONUTF8="1"`
+- حداکثر زمان اجرا (`CODES_MAX_RUNTIME`): **`600` ثانیه (۱۰ دقیقه)**. در صورت عبور از این زمان، `TimeoutExpired` گرفته شده و `exit_code = "TIMEOUT"` ثبت می‌شود.
+- خروجی هر اجرا در `logs\<stem>_result.txt` نوشته می‌شود و وضعیت اجرا (شامل `hash` کوتاه ८ کاراکتری SHA-256، زمان جلالی `ran_at`، `exit_code`، `ok`، `duration_s`) در `%LOCALAPPDATA%\Windows-Agent\codes_state.json` ذخیره می‌گردد.
+
+## ۱۱.۶ قرارداد مناسب برای Capabilityها (Capabilities Schema)
+پیشنهاد استاندارد برای معرفی توانایی‌های پنل ویندوز به ایجنت مدیریت در پیام ثبت/وضعیت:
+```json
+{
+  "agent": "windows-agent-panel",
+  "version": "1.7-3",
+  "commit": "9151019",
+  "timezone": "Asia/Tehran (UTC+03:30)",
+  "capabilities": {
+    "fetch_collab_repo": true,
+    "run_new_codes": true,
+    "run_single_code": true,
+    "take_screenshot": true,
+    "open_windows_report": true,
+    "telegram_queue": {
+      "enabled": true,
+      "modes": ["immediate", "delay", "scheduled_at"],
+      "precision_seconds": 0.2,
+      "supports_edit_delete": true
+    }
+  },
+  "constraints": {
+    "manual_consent_required_when_auto_false": true,
+    "self_update_allowed": false,
+    "write_inside_app_dir_allowed": false,
+    "code_max_runtime_seconds": 600
+  }
+}
+```
+> **نکته‌ی حیاتی:** در حالت دستی (`auto == False`)، هیچ فرمانی از بیرون نباید بدون تأیید کاربر روی صفحه (`need_confirm` / مودال تأیید) اجرا شود.
+
+## ۱۱.۷ نحوه‌ی ارسال Heartbeat بدون مسدودکردن UI
+- رابط کاربری هر `0.7` ثانیه متد `Api.get_state()` را صدا می‌زند. بنابراین `get_state()` **هرگز نباید هیچ درخواست شبکه‌ای بزند** و فقط متغیرهای حافظه (`self.status`, `self.busy`, `self.codes_index`, `_cached_shots`) را برمی‌گرداند.
+- برای ارسال Heartbeat به سرور ایجنت مدیریت:
+  - باید در یک نخ مستقل `daemon=True` (مشابه `_start_status_monitor`) با استفاده از `threading.Event().wait(interval)` (مثلاً هر ۱۵ یا ۳۰ ثانیه) و با `timeout` کوتاه (`5.0` ثانیه) ارسال شود.
+  - از تابع `_http_post_json` استفاده شود تا پروکسی سیستم ویندوز (`v2rayN` از رجیستری `Internet Settings`) و fallback گواهی TLS به صورت خودکار رعایت گردد.
+  - نتیجه‌ی آخرین Heartbeat فقط در یک فیلد ساده مثل `self.status["manager"]` و `self.status_note["manager"]` نوشته شود تا UI بدون هیچ قفلی آن را نمایش دهد.
+
+## ۱۱.۸ مسیر Upgrade کنترل‌شده توسط GitHub Desktop
+- طبق قانون ثابت پروژه، **خودبه‌روزرسانی (`self-update`) به طور کامل حذف و ممنوع شده است.**
+- چرخه‌ی ارتقا فقط به این شکل است:
+  1. ایجنت مادر تغییرات را روی شاخه‌ی `arena/025c788f-windows-agent` در ریپوی `soheylfriend-MAJIDgit/Windows-Agent` کامیت و پوش می‌کند و `version.txt` را بالا می‌برد.
+  2. ایجنت مدیریت می‌تواند با خواندن `version.txt` و آخرین کامیت از GitHub به کاربر اطلاع دهد که نسخه‌ی جدید آماده است (مقایسه با `version` و `commit` گزارش‌شده در Heartbeat پنل).
+  3. کاربر به صورت دستی در **GitHub Desktop** دکمه‌ی **Pull** را می‌زند و `run.bat` را دوباره اجرا می‌کند.
+  4. جدول «شناسنامه‌ی ساخت» در هدر برنامه (`نسخه`، `شناسه ساخت` از `git log -1`، و `تاریخ/ساعت آخرین کامیت` به وقت تهران) به کاربر نشان می‌دهد که دقیقاً همان نسخه‌ی Pull‌شده باز شده است.
