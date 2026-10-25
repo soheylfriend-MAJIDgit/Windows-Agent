@@ -109,6 +109,10 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
 
     # ساخت تصویر fixture واقعی وابسته به Pillow فقط پس از نصب بسته‌های isolated.
     fixture_path = get_fixture_path(vision_root)
+    ready_marker = vision_root / "vision_ready.json"
+    if install_packages:
+        # A failed reinstall must not leave a stale success marker that Heartbeat could trust.
+        ready_marker.unlink(missing_ok=True)
 
     if install_packages and REQUIREMENTS_SOURCE.exists():
         if not (3, 9) <= sys.version_info[:2] <= (3, 11):

@@ -795,6 +795,30 @@ def get_default_vision_paths(vision_root: Path | None = None) -> tuple[Path, Pat
     return py_path, helper_path, fixture_path
 
 
+def _vision_install_marker_ready() -> bool:
+    """نصب‌کننده فقط پس از self-test آفلاین موفق marker می‌نویسد؛ آن را برای Heartbeat می‌خوانیم."""
+    py_path, helper_path, fixture_path = get_default_vision_paths()
+    marker = VISION_DIR / "vision_ready.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("ok") is not True or not data.get("testedAt"):
+            return False
+        for path in (py_path, helper_path, fixture_path):
+            safe, _ = _is_path_safely_inside_vision(path)
+            if not safe:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _clear_vision_install_marker() -> None:
+    try:
+        (VISION_DIR / "vision_ready.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def set_vision_path_overrides(
     ocr_python: str | Path | None = None,
     ocr_helper: str | Path | None = None,
@@ -1015,20 +1039,26 @@ def verify_vision_preflight(
     timeout: float = 15.0,
 ) -> tuple[bool, dict, str]:
     """بررسی Preflight پیش از اجرای ``job_arena.py``: صحت مسیرها، عدم فرار با Symlink و اجرای Self-test روی تصویر تست محلی."""
+    def _failed(details: dict, message: str) -> tuple[bool, dict, str]:
+        with _lock:
+            _runtime_info["arena_vision_ocr_ready"] = False
+        _clear_vision_install_marker()
+        return False, details, message
+
     def_py, def_hlp, fixture_path = get_default_vision_paths()
     py_exe = ocr_python or _vision_override_python or def_py
     hlp_script = ocr_helper or _vision_override_helper or def_hlp
 
     ok_py, err_py = _is_path_safely_inside_vision(py_exe)
     if not ok_py:
-        return False, {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)}, err_py
+        return _failed({"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)}, err_py)
 
     ok_hlp, err_hlp = _is_path_safely_inside_vision(hlp_script)
     if not ok_hlp:
-        return False, {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)}, err_hlp
+        return _failed({"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)}, err_hlp)
 
     if not fixture_path.exists():
-        return False, {}, "تصویر فیکسچر OCR موجود نیست؛ نصب ایزوله را با tools/vision/install_vision.py --install-packages تکمیل کنید."
+        return _failed({}, "تصویر فیکسچر OCR موجود نیست؛ نصب ایزوله را با tools/vision/install_vision.py --install-packages تکمیل کنید.")
 
     ok_run, ocr_data, err_run = invoke_local_ocr(
         fixture_path,
@@ -1038,16 +1068,14 @@ def verify_vision_preflight(
         offline=True,
     )
     if not ok_run:
-        return (
-            False,
+        return _failed(
             {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)},
             f"تست اولیه (Self-test) PaddleOCR محلی ناموفق بود: {err_run}",
         )
 
     items = ocr_data.get("items") or []
     if not items:
-        return (
-            False,
+        return _failed(
             {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)},
             "خروجی Self-test در PaddleOCR محلی خالی بود (هیچ متنی تشخیص داده نشد).",
         )
@@ -1214,7 +1242,10 @@ def _refresh_secret_cache(api) -> dict | None:
 
 
 def _build_heartbeat_payload(api, agent_id: str) -> dict:
-    version = "1.7-7"
+    try:
+        version = (Path(__file__).resolve().parent / "version.txt").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        version = "unknown"
     commit = ""
     auto_mode = False
     busy = None
@@ -1239,7 +1270,7 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
     else:
         busy = active_cmd
 
-    vision_ready = bool(_runtime_info.get("arena_vision_ocr_ready", False))
+    vision_ready = bool(_runtime_info.get("arena_vision_ocr_ready", False)) or _vision_install_marker_ready()
     network_ready = bool(is_network_resilience_ready())
     return {
         "agentId": agent_id,

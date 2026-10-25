@@ -33,7 +33,7 @@ stdout helper فقط یک JSON UTF-8 است؛ پیام‌های کتابخانه
 - Venv: `%LOCALAPPDATA%\Windows-Agent\vision\.venv`
 - مدل و cache: `%LOCALAPPDATA%\Windows-Agent\vision\models` و `cache`
 
-هنگام اجرای `job_arena.py` از مسیر D1، manager قبل از اجرا مسیرهای absolute را بررسی می‌کند، reparse/symlink فراری را رد می‌کند، helper را با سقف ۴۵ ثانیه و process group مستقل برای self-test اجرا می‌کند و فقط دو متغیر مسیر OCR را به subprocess Arena تزریق می‌کند. اگر preflight شکست بخورد، فرمان با `ocr_preflight_failed` متوقف می‌شود. مسیر اصلی UI Automation دست‌نخورده می‌ماند؛ job Bridge 7 باید OCR را تنها fallback قرار دهد.
+هنگام اجرای `job_arena.py` از مسیر D1، manager قبل از اجرا مسیرهای absolute را بررسی می‌کند، reparse/symlink فراری را رد می‌کند، helper را با سقف ۴۵ ثانیه و process group مستقل برای self-test اجرا می‌کند و فقط دو متغیر مسیر OCR را به subprocess Arena تزریق می‌کند. فایل `vision_ready.json` فقط پس از self-test آفلاین موفق توسط BAT نوشته می‌شود و مبنای اعلام `arena_vision_ocr` در Heartbeat است. نصب مجدد marker قبلی را ابتدا حذف می‌کند تا شکست نصب وضعیت آماده‌ی قدیمی را حفظ نکند. اگر preflight شکست بخورد، marker حذف و فرمان با `ocr_preflight_failed` متوقف می‌شود. مسیر اصلی UI Automation دست‌نخورده می‌ماند؛ job Bridge 7 باید OCR را تنها fallback قرار دهد.
 
 ## مرحله‌ی تکمیلی موردنیاز روی Windows
 
