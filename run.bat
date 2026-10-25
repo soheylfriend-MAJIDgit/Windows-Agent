@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher (v1.7-10 - build identity + optional local OCR installer)
+rem  Windows Agent launcher (v1.7-11 - build identity + optional local OCR installer)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================

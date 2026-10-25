@@ -30,6 +30,38 @@ if not defined PY_CMD (
     exit /b 1
 )
 
+rem Paddle's native libpaddle.pyd requires the Microsoft VC++ x64 runtime.
+%PY_CMD% -c "import ctypes; ctypes.WinDLL('vcruntime140.dll'); ctypes.WinDLL('vcruntime140_1.dll'); ctypes.WinDLL('msvcp140.dll')" >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo Paddle's native core needs Microsoft's Visual C++ x64 runtime.
+    echo The installer will download it from the official Microsoft URL and request admin approval.
+    choice /C YN /N /M "Install the Microsoft runtime prerequisite? [Y/N]: "
+    if errorlevel 2 (
+        echo [ERROR] PaddleOCR cannot load without the VC++ runtime.
+        pause
+        exit /b 1
+    )
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\vision\install_vc_runtime.ps1"
+    set "VC_INSTALL_RESULT=%ERRORLEVEL%"
+    if "%VC_INSTALL_RESULT%"=="3010" (
+        echo Windows needs to restart before PaddleOCR can load. Restart, then run this BAT again.
+        pause
+        exit /b 1
+    )
+    if not "%VC_INSTALL_RESULT%"=="0" (
+        echo [ERROR] The Microsoft runtime could not be installed.
+        pause
+        exit /b 1
+    )
+    %PY_CMD% -c "import ctypes; ctypes.WinDLL('vcruntime140.dll'); ctypes.WinDLL('vcruntime140_1.dll'); ctypes.WinDLL('msvcp140.dll')" >nul 2>nul
+    if errorlevel 1 (
+        echo [ERROR] The VC++ runtime is still unavailable. Restart Windows and retry.
+        pause
+        exit /b 1
+    )
+)
+
 %PY_CMD% "%~dp0tools\vision\install_vision.py" --install-packages
 if errorlevel 1 (
     echo.

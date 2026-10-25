@@ -170,8 +170,29 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
         )
         if fixture_result.returncode != 0:
             return {"ok": False, "vision_root": str(vision_root), "error": (fixture_result.stderr or fixture_result.stdout)[-1200:]}
-        # اجرای آنلاین فقط در این فرمان صریح و آگاهانه دانلود می‌کند؛ این همان مرحله‌ی دریافت اولیه مدل‌هاست.
-        log_fn("دانلود یک‌باره مدل‌های CPU از منبع بسته‌های عمومی آغاز شد؛ تصاویر و متن‌های کاربر ارسال نمی‌شوند.")
+        # Fail early with a useful diagnostic if the native Paddle DLL cannot load.
+        paddle_probe = subprocess.run(
+            [str(py_exe), "-c", "import paddle; print(paddle.__version__)"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+        )
+        if paddle_probe.returncode != 0:
+            return {
+                "ok": False,
+                "vision_root": str(vision_root),
+                "error": (
+                    "PaddlePaddle packages are present but the native libpaddle DLL failed to load. "
+                    "On Windows, run install_vision.bat and approve the official Microsoft Visual C++ x64 runtime prompt. "
+                    f"Details: {(paddle_probe.stderr or paddle_probe.stdout)[-1600:]}"
+                ),
+            }
+
+        # Explicitly consented one-time model warm-up; no user screenshot or OCR text leaves this machine.
+        log_fn("Downloading the initial CPU OCR model. Only model files are fetched; user images/text are not uploaded.")
         warm_result = subprocess.run(
             [str(py_exe), str(helper_dest), "--image", str(fixture_path), "--json"],
             check=False,
