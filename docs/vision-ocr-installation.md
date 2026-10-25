@@ -39,7 +39,7 @@ stdout helper فقط یک JSON UTF-8 است؛ پیام‌های کتابخانه
 
 قبل از آن‌که مدیریت Arena را به‌عنوان آماده اعلام کنید، موارد زیر باید روی همان Windows Agent واقعی انجام و خروجی/مدارک ثبت شوند:
 
-1. Python، PaddlePaddle و PaddleOCR version واقعی (`python.exe -c "import paddle,paddleocr; ..."`)؛ بررسی سازگاری بسته‌ها با نسخه و معماری ویندوز. اگر `libpaddle.pyd` با پیام `DLL load failed` مواجه شد، `install_vision.bat` حالا Microsoft Visual C++ x64 Runtime را بررسی می‌کند و در صورت نیاز با رضایت جداگانه از دامنه‌ی رسمی Microsoft می‌گیرد؛ امضای Authenticode قبل از اجرا بررسی می‌شود و نصب ممکن است تأیید مدیر سیستم بخواهد.
+1. Python، PaddlePaddle و PaddleOCR version واقعی (`python.exe -c "import paddle,paddleocr; ..."`)؛ بررسی سازگاری بسته‌ها با نسخه و معماری ویندوز. اگر `libpaddle.pyd` با پیام `DLL load failed` مواجه شد، helper پیش از import مسیرهای DLL مجزای `paddle/libs` و کتابخانه‌های عددی را به DLL search path همین پردازش اضافه و نصب را بدون دانلود مدل بررسی می‌کند. `install_vision.bat` نیز Microsoft Visual C++ x64 Runtime را بررسی می‌کند و در صورت نیاز با رضایت جداگانه از دامنه‌ی رسمی Microsoft می‌گیرد؛ امضای Authenticode قبل از اجرا بررسی می‌شود و نصب ممکن است تأیید مدیر سیستم بخواهد.
 2. نصب با رضایت کاربر، دانلود یک‌باره مدل، warm-up و اجرای self-test بعد از قطع اینترنت؛ عبارت `Was this task successful?` باید از تصویر واقعی پیدا شود.
 3. آزمون UIA موفق و UIA ناموفق با OCR و guard نوار آدرس؛ اطمینان از نبود کلیک تکراری.
 4. قطع شبکه قبل از تایپ و هنگام انتظار پاسخ، بازگشت پس از چرخه ۶۰ثانیه‌ای و اثبات ارسال دقیقاً یک‌باره.

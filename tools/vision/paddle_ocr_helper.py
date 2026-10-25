@@ -252,6 +252,44 @@ def _priority_sort_key(item: dict) -> tuple[int, float]:
     return (len(ARENA_PRIORITY_PHRASES) + 1, -float(item.get("confidence", 0.0)))
 
 
+# هَندل‌ها باید زنده بمانند؛ در Python 3.8+ ویندوز آن‌ها مسیر DLL جست‌وجو را فعال نگه می‌دارد.
+_DLL_DIRECTORY_HANDLES = []
+
+
+def _prepare_windows_dll_search() -> list[str]:
+    """افزودن مسیر DLLهای wheelهای بومی Paddle/NumPy به search path پروسه‌ی ایزوله.
+
+    Python 3.8+ مسیر working-directory را از DLL search حذف کرده است؛ بعضی wheelها
+    در نصب‌های Windows به add_dll_directory صریح نیاز دارند.
+    """
+    if not IS_WINDOWS:
+        return []
+    site = Path(sys.prefix) / "Lib" / "site-packages"
+    candidates = (
+        site / "paddle" / "libs",
+        site / "paddle" / "base",
+        site / "paddle",
+        site / "numpy.libs",
+        site / "numpy" / ".libs",
+        site / "scipy.libs",
+        site / "scipy" / ".libs",
+    )
+    added: list[str] = []
+    for folder in candidates:
+        if not folder.is_dir():
+            continue
+        value = str(folder.resolve())
+        if value not in added:
+            added.append(value)
+            try:
+                _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(value))
+            except (AttributeError, OSError):
+                pass
+    if added:
+        os.environ["PATH"] = os.pathsep.join(added + [os.environ.get("PATH", "")])
+    return added
+
+
 # نمونه سینگلتون مدل برای حفظ warm-up در صورت فراخوانی مکرر در یک پروسه
 _PADDLE_INSTANCE = None
 
@@ -262,6 +300,7 @@ def _run_paddleocr_engine(image_path: Path) -> list[dict]:
     items: list[dict] = []
     offset_x, offset_y = _virtual_screen_origin()
 
+    _prepare_windows_dll_search()
     with contextlib.redirect_stdout(sys.stderr):
         try:
             from paddleocr import PaddleOCR  # type: ignore
@@ -384,7 +423,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--offline", action="store_true", help="Strictly block any socket connection")
     parser.add_argument("--create-fixture", type=str, default="", help="Create local self-test fixture PNG at path")
     parser.add_argument("--selftest", action="store_true", help="Run self-test on local fixture PNG")
+    parser.add_argument("--check-install", action="store_true", help="Check Paddle/PaddleOCR native imports and DLL resolution without downloading models")
     args = parser.parse_args(argv)
+
+    if args.check_install:
+        try:
+            dll_dirs = _prepare_windows_dll_search()
+            with contextlib.redirect_stdout(sys.stderr):
+                import paddle  # type: ignore
+                import paddleocr  # type: ignore
+            return _emit_json({
+                "ok": True,
+                "engine": "paddleocr",
+                "paddleVersion": str(paddle.__version__),
+                "paddleocrVersion": str(getattr(paddleocr, "__version__", "unknown")),
+                "dllDirectoriesAdded": dll_dirs,
+            }, 0)
+        except Exception as exc:
+            return _emit_json({"ok": False, "engine": "paddleocr", "error": str(exc)}, 1)
 
     if args.create_fixture:
         target = Path(args.create_fixture).resolve()

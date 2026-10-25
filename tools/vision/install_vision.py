@@ -170,9 +170,9 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
         )
         if fixture_result.returncode != 0:
             return {"ok": False, "vision_root": str(vision_root), "error": (fixture_result.stderr or fixture_result.stdout)[-1200:]}
-        # Fail early with a useful diagnostic if the native Paddle DLL cannot load.
+        # Check native DLL imports using the helper's explicit Windows DLL search paths before model downloads.
         paddle_probe = subprocess.run(
-            [str(py_exe), "-c", "import paddle; print(paddle.__version__)"],
+            [str(py_exe), str(helper_dest), "--check-install", "--json"],
             check=False,
             capture_output=True,
             text=True,
@@ -180,16 +180,25 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
             errors="replace",
             timeout=45,
         )
-        if paddle_probe.returncode != 0:
+        try:
+            paddle_check = json.loads(paddle_probe.stdout or "{}")
+        except ValueError:
+            paddle_check = {"ok": False, "error": (paddle_probe.stderr or paddle_probe.stdout)[-1600:]}
+        if paddle_probe.returncode != 0 or not paddle_check.get("ok"):
             return {
                 "ok": False,
                 "vision_root": str(vision_root),
                 "error": (
-                    "PaddlePaddle packages are present but the native libpaddle DLL failed to load. "
-                    "On Windows, run install_vision.bat and approve the official Microsoft Visual C++ x64 runtime prompt. "
-                    f"Details: {(paddle_probe.stderr or paddle_probe.stdout)[-1600:]}"
+                    "PaddlePaddle native import check failed before model download. "
+                    "The helper added its isolated paddle/libs and numerical-library DLL folders. "
+                    "Check the VC++ runtime, Windows version, x64 architecture, CPU AVX support and antivirus quarantine. "
+                    f"Details: {paddle_check.get('error') or (paddle_probe.stderr or paddle_probe.stdout)[-1600:]}"
                 ),
             }
+        log_fn(
+            f"Native import passed: Paddle {paddle_check.get('paddleVersion')}, "
+            f"PaddleOCR {paddle_check.get('paddleocrVersion')}."
+        )
 
         # Explicitly consented one-time model warm-up; no user screenshot or OCR text leaves this machine.
         log_fn("Downloading the initial CPU OCR model. Only model files are fetched; user images/text are not uploaded.")
