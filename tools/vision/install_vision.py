@@ -29,6 +29,7 @@ import venv
 IS_WINDOWS = os.name == "nt"
 THIS_DIR = Path(__file__).resolve().parent
 HELPER_SOURCE = THIS_DIR / "paddle_ocr_helper.py"
+DLL_DIAGNOSTIC_SOURCE = THIS_DIR / "diagnose_paddle_dlls.py"
 REQUIREMENTS_SOURCE = THIS_DIR / "requirements-vision.txt"
 
 
@@ -100,6 +101,9 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
     helper_dest = get_helper_dest(vision_root)
     if HELPER_SOURCE.exists():
         shutil.copy2(HELPER_SOURCE, helper_dest)
+    dll_diag_dest = vision_root / "diagnose_paddle_dlls.py"
+    if DLL_DIAGNOSTIC_SOURCE.exists():
+        shutil.copy2(DLL_DIAGNOSTIC_SOURCE, dll_diag_dest)
 
     py_exe = _create_isolated_venv(venv_dir, log_fn=log_fn)
 
@@ -185,14 +189,29 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
         except ValueError:
             paddle_check = {"ok": False, "error": (paddle_probe.stderr or paddle_probe.stdout)[-1600:]}
         if paddle_probe.returncode != 0 or not paddle_check.get("ok"):
+            dll_report = ""
+            if dll_diag_dest.exists():
+                try:
+                    diag_run = subprocess.run(
+                        [str(py_exe), str(dll_diag_dest)],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=30,
+                    )
+                    dll_report = (diag_run.stdout or diag_run.stderr)[-5000:]
+                except Exception as diag_exc:
+                    dll_report = f"DLL dependency scan failed: {diag_exc}"
             return {
                 "ok": False,
                 "vision_root": str(vision_root),
                 "error": (
                     "PaddlePaddle native import check failed before model download. "
-                    "The helper added its isolated paddle/libs and numerical-library DLL folders. "
-                    "Check the VC++ runtime, Windows version, x64 architecture, CPU AVX support and antivirus quarantine. "
-                    f"Details: {paddle_check.get('error') or (paddle_probe.stderr or paddle_probe.stdout)[-1600:]}"
+                    "A static DLL dependency scan follows; missingDlls is the useful field. "
+                    f"Import details: {paddle_check.get('error') or (paddle_probe.stderr or paddle_probe.stdout)[-1600:]} "
+                    f"Dependency scan: {dll_report or 'not available'}"
                 ),
             }
         log_fn(
