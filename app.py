@@ -46,7 +46,7 @@ def _read_app_version() -> str:
             return raw
     except (OSError, UnicodeError):
         pass
-    return "1.7-9"
+    return "1.7-10"
 
 APP_VERSION = _read_app_version()
 

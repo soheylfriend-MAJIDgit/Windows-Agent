@@ -10,7 +10,7 @@
 python tools\vision\install_vision.py --install-packages
 ```
 
-نصب CPU با نسخه‌های pin شده در `tools/vision/requirements-vision.txt` در venv ایزوله انجام می‌شود. در همان اجرای آگاهانه، fixture محلی ساخته و مدل warm-up می‌شود. بعد از آن، آزمون self-test را با قطع اینترنت اجرا کنید:
+نصب CPU با نسخه‌های pin شده در `tools/vision/requirements-vision.txt` در venv ایزوله انجام می‌شود. pip با timeout شبکه‌ی ۱۸۰ ثانیه و ۱۲ retry اجرا می‌شود و تا سه بار کل نصب را تلاش می‌کند؛ cache و venv در شکست پاک نمی‌شوند. اگر دانلود قطع شد، همان `install_vision.bat` را دوباره اجرا کنید؛ نیازی به حذف دستی پوشه نیست. در همان اجرای آگاهانه، fixture محلی ساخته و مدل warm-up می‌شود. بعد از آن، آزمون self-test را با قطع اینترنت اجرا کنید:
 
 ```powershell
 $root = Join-Path $env:LOCALAPPDATA 'Windows-Agent\vision'

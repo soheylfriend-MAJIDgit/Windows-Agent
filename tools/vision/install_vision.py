@@ -126,25 +126,38 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        install_result = subprocess.run(
-            [
-                str(py_exe),
-                "-m",
-                "pip",
-                "install",
-                "--no-warn-script-location",
-                "-r",
-                str(REQUIREMENTS_SOURCE),
-            ],
-            check=False,
-        )
-        if install_result.returncode != 0:
+        install_result = None
+        pip_args = [
+            str(py_exe), "-m", "pip", "install",
+            "--disable-pip-version-check",
+            "--prefer-binary",
+            "--timeout", "180",
+            "--retries", "12",
+            "--no-warn-script-location",
+            "-r", str(REQUIREMENTS_SOURCE),
+        ]
+        # Large Windows wheels (for example SciPy) may download slowly or stall temporarily.
+        # Keep pip's cache between attempts so rerunning the BAT can resume without starting over.
+        for attempt in range(1, 4):
+            log_fn(f"[vision] pip install attempt {attempt}/3; network timeout is 180 seconds.")
+            install_result = subprocess.run(pip_args, check=False)
+            if install_result.returncode == 0:
+                break
+            if attempt < 3:
+                log_fn("[vision] Download failed; waiting 8 seconds, then retrying with pip cache preserved.")
+                import time
+                time.sleep(8)
+        if install_result is None or install_result.returncode != 0:
+            code = install_result.returncode if install_result is not None else -1
             return {"ok": False, **{
                 "vision_root": str(vision_root),
                 "ocr_python": str(py_exe),
                 "ocr_helper": str(helper_dest),
                 "fixture": str(fixture_path),
-                "error": f"pip install failed with exit code {install_result.returncode}",
+                "error": (
+                    f"pip install failed after 3 attempts (exit code {code}). "
+                    "Rerun install_vision.bat when the connection is stable; the isolated venv and pip cache were kept."
+                ),
             }}
         fixture_result = subprocess.run(
             [str(py_exe), str(helper_dest), "--create-fixture", str(fixture_path), "--json"],
