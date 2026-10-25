@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul 2>nul
 set "PYTHONUTF8=1"
 cd /d "%~dp0"
@@ -43,13 +43,13 @@ if errorlevel 1 (
         exit /b 1
     )
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\vision\install_vc_runtime.ps1"
-    set "VC_INSTALL_RESULT=%ERRORLEVEL%"
-    if "%VC_INSTALL_RESULT%"=="3010" (
+    set "VC_INSTALL_RESULT=!ERRORLEVEL!"
+    if "!VC_INSTALL_RESULT!"=="3010" (
         echo Windows needs to restart before PaddleOCR can load. Restart, then run this BAT again.
         pause
         exit /b 1
     )
-    if not "%VC_INSTALL_RESULT%"=="0" (
+    if not "!VC_INSTALL_RESULT!"=="0" (
         echo [ERROR] The Microsoft runtime could not be installed.
         pause
         exit /b 1
