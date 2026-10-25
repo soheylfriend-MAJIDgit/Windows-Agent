@@ -37,6 +37,7 @@ import ctypes
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -1241,6 +1242,149 @@ def _refresh_secret_cache(api) -> dict | None:
     return cfg
 
 
+NETWORK_READY_SCHEMA = 1
+NETWORK_READY_MARKER = STATE_DIR / "network_ready.json"
+NETWORK_TEST_KEYS = (
+    "drop_before_ui",
+    "waited_full_cycle",
+    "zero_ui_actions_offline",
+    "safe_resume",
+    "single_prompt_send",
+    "no_false_no_progress",
+    "unrecoverable_failed_cleanly",
+    "local_cancel_under_2s",
+)
+
+
+def _network_report_root() -> Path | None:
+    """Use the app's Google Drive logs folder (or its normal Desktop\\logs fallback)."""
+    try:
+        import app as _app
+        root, _drive_used = _app.resolve_report_dir()
+        return Path(root) / "network_resilience_tests"
+    except Exception:
+        return None
+
+
+def _network_ready_marker_valid(api=None) -> bool:
+    """Accept only a recent Windows live-acceptance report bound to this build and intact report hash."""
+    try:
+        if NETWORK_READY_MARKER.is_symlink() or not NETWORK_READY_MARKER.is_file():
+            return False
+        marker = json.loads(NETWORK_READY_MARKER.read_text(encoding="utf-8"))
+        if sys.platform != "win32":
+            return False
+        if not isinstance(marker, dict) or marker.get("schemaVersion") != NETWORK_READY_SCHEMA:
+            return False
+        if marker.get("status") != "passed" or marker.get("platform") != "win32":
+            return False
+        tests = marker.get("tests")
+        if not isinstance(tests, dict) or set(tests) != set(NETWORK_TEST_KEYS):
+            return False
+        if any(tests.get(key) is not True for key in NETWORK_TEST_KEYS):
+            return False
+        version_path = Path(__file__).resolve().parent / "version.txt"
+        current_version = version_path.read_text(encoding="utf-8").strip()
+        if marker.get("appVersion") != current_version:
+            return False
+        current_commit = ""
+        if api is not None:
+            current_commit = str((getattr(api, "build", None) or {}).get("commit") or "")
+        if not current_commit or marker.get("buildCommit") != current_commit:
+            return False
+        created = datetime.fromisoformat(str(marker.get("createdAt") or "").replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()
+        if created.tzinfo is None or age_seconds < -60 or age_seconds > 30 * 86400:
+            return False
+        report_name = str(marker.get("reportName") or "")
+        if not re.fullmatch(r"network_acceptance_[A-Za-z0-9_-]+\.json", report_name):
+            return False
+        configured_root = _network_report_root()
+        if configured_root is None:
+            return False
+        report_root = configured_root.resolve()
+        report_candidate = report_root / report_name
+        if report_candidate.is_symlink():
+            return False
+        report_path = report_candidate.resolve()
+        if report_path.parent != report_root or not report_path.is_file():
+            return False
+        raw = report_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != marker.get("reportSha256"):
+            return False
+        report = json.loads(raw.decode("utf-8"))
+        if (
+            not isinstance(report, dict)
+            or report.get("schemaVersion") != NETWORK_READY_SCHEMA
+            or report.get("status") != "passed"
+            or report.get("platform") != "win32"
+            or report.get("appVersion") != current_version
+            or report.get("buildCommit") != current_commit
+            or report.get("reportId") != marker.get("reportId")
+            or report.get("createdAt") != marker.get("createdAt")
+            or report.get("tests") != tests
+        ):
+            return False
+        evidence = report.get("evidence")
+        if not isinstance(evidence, dict) or any(key not in evidence for key in NETWORK_TEST_KEYS):
+            return False
+        evidence_dir_name = f"network_acceptance_{report.get('reportId')}_evidence"
+        if not re.fullmatch(r"network_acceptance_[0-9a-f]{32}_evidence", evidence_dir_name):
+            return False
+        evidence_dir_candidate = report_root / evidence_dir_name
+        if evidence_dir_candidate.is_symlink():
+            return False
+        evidence_dir = evidence_dir_candidate.resolve()
+        if evidence_dir.parent != report_root or not evidence_dir.is_dir():
+            return False
+        total_evidence_bytes = 0
+        for key in NETWORK_TEST_KEYS:
+            item = evidence.get(key)
+            if not isinstance(item, dict):
+                return False
+            filename = str(item.get("file") or "")
+            if not re.fullmatch(re.escape(evidence_dir_name) + "/" + re.escape(key) + r"\.[a-z0-9]{1,8}", filename):
+                return False
+            evidence_candidate = report_root / filename
+            if evidence_candidate.is_symlink():
+                return False
+            evidence_path = evidence_candidate.resolve()
+            if evidence_path.parent != evidence_dir or not evidence_path.is_file():
+                return False
+            size = evidence_path.stat().st_size
+            if size <= 0 or size > 12 * 1024 * 1024 or size != int(item.get("sizeBytes", -1)):
+                return False
+            total_evidence_bytes += size
+            if hashlib.sha256(evidence_path.read_bytes()).hexdigest() != item.get("sha256"):
+                return False
+        if total_evidence_bytes > 80 * 1024 * 1024:
+            return False
+        obs = report.get("observations") if isinstance(report.get("observations"), dict) else {}
+        offline_seconds = float(obs.get("offlineSeconds", 0))
+        local_cancel_seconds = float(obs.get("localCancelSeconds", 99))
+        if not math.isfinite(offline_seconds) or offline_seconds < NETWORK_RECHECK_INTERVAL:
+            return False
+        if not math.isfinite(local_cancel_seconds) or not 0 <= local_cancel_seconds <= 2.0:
+            return False
+        if int(obs.get("uiActionsDuringOutage", -1)) != 0 or int(obs.get("promptSendCount", 0)) != 1:
+            return False
+        if obs.get("unrecoverableFinalStatus") != "failed":
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _network_preflight_ok(cfg: dict, api=None) -> bool:
+    """Require a valid Windows acceptance marker and a fresh authenticated Manager API probe."""
+    if not _network_ready_marker_valid(api):
+        return False
+    ok, code, data = _http_json("GET", f"{cfg['base_url']}/connection-test", cfg["agent_key"], None, timeout=2.5)
+    # Require an authenticated successful response matching the documented endpoint schema;
+    # 401/403/404 must never count as a healthy preflight.
+    return bool(ok and 200 <= code < 300 and isinstance(data, dict) and "test" in data)
+
+
 def _build_heartbeat_payload(api, agent_id: str) -> dict:
     try:
         version = (Path(__file__).resolve().parent / "version.txt").read_text(encoding="utf-8").strip() or "unknown"
@@ -1331,6 +1475,10 @@ def send_heartbeat_once(api, cfg: dict | None = None) -> tuple[bool, int, dict]:
     base_url = cfg["base_url"]
     agent_key = cfg["agent_key"]
     agent_id = cfg.get("agent_id") or DEFAULT_AGENT_ID
+    # network_resilience stays disabled until a valid Windows acceptance marker and live authenticated preflight both pass.
+    network_preflight = _network_preflight_ok(cfg, api)
+    with _lock:
+        _runtime_info["network_resilience_ready"] = network_preflight
     payload = _build_heartbeat_payload(api, agent_id)
 
     ok, code, data = _http_json("POST", f"{base_url}/heartbeat", agent_key, payload, timeout=HTTP_TIMEOUT)
@@ -1718,7 +1866,7 @@ def _ask_local_confirmation(session: _CommandSession, job_name: str) -> str:
 
         threading.Thread(target=_run_custom, daemon=True).start()
         while not decision_box["done"] and not _stop_event.is_set():
-            if session.poll_control():
+            if _local_cancel_event.is_set() or session.poll_control():
                 return "cancelled"
             time.sleep(min(0.2, CONFIRM_POLL_INTERVAL))
         return "approved" if decision_box["approved"] else "rejected"
@@ -1759,7 +1907,7 @@ def _ask_local_confirmation(session: _CommandSession, job_name: str) -> str:
 
     threading.Thread(target=_show_msgbox, daemon=True).start()
     while not decision_win["done"] and not _stop_event.is_set():
-        if session.poll_control():
+        if _local_cancel_event.is_set() or session.poll_control():
             return "cancelled"
         session.mark_progress()
         time.sleep(CONFIRM_POLL_INTERVAL)
@@ -2056,6 +2204,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
     cmd_id = session.cmd_id
     if not cmd_id:
         return "invalid"
+    clear_local_cancel()
 
     with _lock:
         _active_command_id = cmd_id
@@ -2218,7 +2367,6 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 data={"engine": "paddleocr", "localOnly": True},
             )
 
-        clear_local_cancel()
         # ۵. شروع فرآیند در Process Group مستقل
         proc = spawn_job_process(synced_path, run_cwd, extra_env=arena_env)
         pid = int(proc.pid)
@@ -2363,6 +2511,12 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 last_control_poll = time.monotonic()
                 _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq)
 
+            if _local_cancel_event.is_set():
+                with _lock:
+                    local_reason = _local_cancel_reason or "لغو محلی از پنل ویندوز هنگام قطع اینترنت"
+                session.cancel_requested = True
+                session.cancel_reason = local_reason
+
             if session.cancel_requested or _stop_event.is_set():
                 terminate_tree(proc, start_marker)
                 break
@@ -2482,6 +2636,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                     api.busy = None
             except Exception:
                 pass
+        clear_local_cancel()
 
 
 def wait_for_manager_network(api, cfg: dict) -> bool:
