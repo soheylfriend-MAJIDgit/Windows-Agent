@@ -50,65 +50,16 @@
 
   <!-- ─────────────── مغز ایجنت ─────────────── -->
   <section class="view" data-tab="main">
-    <div class="grid-top">
-      <article class="card state-card">
-        <div class="ring-wrap">
-          <svg class="ring" viewBox="0 0 100 100" aria-hidden="true">
-            <circle class="ring-track" cx="50" cy="50" r="42"/>
-            <circle class="ring-value" id="ring" cx="50" cy="50" r="42"/>
-          </svg>
-          <div class="ring-center">
-            <b id="ring-number">—</b>
-            <span id="ring-label">ثانیه</span>
-          </div>
-        </div>
-        <div class="state-body">
-          <span class="label">حالت اجرا</span>
-          <strong id="mode-title">دستی</strong>
-          <p id="mode-hint">هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود.</p>
-          <div class="auto-interval">
-            <span>هر</span>
-            <input id="sync-seconds" type="number" min="3" max="600" step="1" inputmode="numeric"
-                   aria-label="فاصله‌ی دور خودکار به ثانیه">
-            <span>ثانیه یک دور</span>
-          </div>
-        </div>
-        <label class="switch" title="حالت دستی / خودکار">
-          <input type="checkbox" id="auto-switch">
-          <span class="track"><span class="knob"></span></span>
-        </label>
-      </article>
-
-      <article class="card stats-card">
-        <span class="label">کدهای ایجنت همکار</span>
-        <div class="stats">
-          <div class="stat"><b id="stat-total">۰</b><span>کل کدها</span></div>
-          <div class="stat ok"><b id="stat-done">۰</b><span>اجرا شده</span></div>
-          <div class="stat warn"><b id="stat-pending">۰</b><span>در انتظار</span></div>
-        </div>
-        <button class="btn btn-primary" id="btn-check">
-          <svg viewBox="0 0 24 24"><path d="M12 4v10m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
-          بررسی مخزن همکار
-        </button>
-      </article>
-    </div>
-
-    <article class="card actions-card">
-      <span class="label">کارهای سریع</span>
-      <div class="actions">
-        <button class="btn btn-ghost" id="btn-shot">
-          <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></svg>
-          گرفتن اسکرین‌شات
-        </button>
-        <button class="btn btn-ghost" id="btn-report">
-          <svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/></svg>
-          گزارش برنامه‌های باز
-        </button>
-        <button class="btn btn-ghost" id="btn-open-codes">
-          <svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v10H4z"/></svg>
-          پوشه کدها
-        </button>
-      </div>
+    <article class="card brain-mode-card" id="brain-mode-card">
+      <img class="brain-mode-art" src="/ui/brain-mark.png" alt="مغز ایجنت ویندوز">
+      <span class="label">حالت اجرای ایجنت</span>
+      <strong class="brain-mode-title" id="mode-title">دستی</strong>
+      <p class="brain-mode-hint" id="mode-hint">فرمان‌های ایجنت مدیریت پیش از اجرا تأیید محلی می‌گیرند.</p>
+      <label class="switch brain-mode-switch" title="تغییر بین حالت دستی و خودکار">
+        <input type="checkbox" id="auto-switch" aria-label="حالت دستی یا خودکار">
+        <span class="track"><span class="knob"></span></span>
+      </label>
+      <span class="brain-mode-state" id="mode-state-label">حالت دستی</span>
     </article>
 
     <article class="card system-card">

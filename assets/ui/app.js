@@ -303,82 +303,33 @@
   }
 
   function renderMode(s) {
-    var num = $('ring-number');
-    var label = $('ring-label');
+    var card = $('brain-mode-card');
     var title = $('mode-title');
     var hint = $('mode-hint');
-    var sw = $('auto-switch');
+    var toggle = $('auto-switch');
+    var stateLabel = $('mode-state-label');
+    var automatic = !!s.auto;
 
-    sw.checked = !!s.auto;
-    setVal('sync-seconds', s.auto_total || 10);
+    toggle.checked = automatic;
     document.body.classList.toggle('busy', !!s.busy);
+    card.classList.toggle('is-auto', automatic);
 
     if (s.busy) {
-      title.textContent = 'در حال کار';
-      title.classList.add('on');
+      title.textContent = 'در حال اجرا';
       hint.textContent = s.busy;
-      num.textContent = '…';
-      label.textContent = 'صبر کن';
-      ringState = { mode: 'busy', remaining: 0, total: 0, receivedAt: performance.now() };
-    } else if (s.auto) {
+    } else if (automatic) {
       title.textContent = 'خودکار';
-      title.classList.add('on');
-      hint.textContent = 'هر ' + fa(s.auto_total) + ' ثانیه مخزن همکار بررسی می‌شود؛ بدون پرسیدن.';
-      label.textContent = 'تا دور بعد';
-      ringState = {
-        mode: 'auto',
-        remaining: Number(s.auto_remaining) || 0,
-        total: Number(s.auto_total) || 10,
-        receivedAt: performance.now()
-      };
+      hint.textContent = 'فرمان‌های مجاز ایجنت مدیریت بدون تأیید محلی اجرا می‌شوند؛ دور خودکار برنامه هم فعال است.';
     } else {
       title.textContent = 'دستی';
-      title.classList.remove('on');
-      hint.textContent = 'هیچ کاری بدون اجازه‌ی تو انجام نمی‌شود.';
-      num.textContent = '—';
-      label.textContent = 'دستی';
-      ringState = { mode: 'manual', remaining: 0, total: 0, receivedAt: performance.now() };
-      $('ring').classList.remove('warn');
+      hint.textContent = 'فرمان‌های ایجنت مدیریت پیش از اجرا تأیید محلی می‌گیرند.';
     }
-  }
-
-  /* حلقه‌ی شمارش معکوس: هر فریم (۶۰ بار در ثانیه) کشیده می‌شود، نه پرشی */
-  var CIRC = 2 * Math.PI * 42;
-  var ringState = { mode: 'manual', remaining: 0, total: 10, receivedAt: 0 };
-  var lastTickSec = null;
-
-  function animateRing(ts) {
-    var el = $('ring');
-    var fraction = 0;
-
-    if (ringState.mode === 'auto') {
-      var elapsed = (ts - ringState.receivedAt) / 1000;
-      var rem = Math.max(0, ringState.remaining - elapsed);
-      fraction = ringState.total ? Math.min(1, Math.max(0, 1 - rem / ringState.total)) : 0;
-
-      var secs = Math.ceil(rem);
-      if ($('ring-number').textContent !== fa(secs)) $('ring-number').textContent = fa(secs);
-
-      /* سه ثانیه‌ی آخر: هر ثانیه یک بوق */
-      if (secs !== lastTickSec) {
-        if (secs > 0 && secs <= 3) play('tick');
-        lastTickSec = secs;
-      }
-      el.classList.toggle('warn', rem <= 3);
-    } else if (ringState.mode === 'busy') {
-      fraction = 0.35;
-    }
-
-    el.style.strokeDashoffset = String(CIRC * (1 - fraction));
-    requestAnimationFrame(animateRing);
+    stateLabel.textContent = automatic ? 'اجرا بدون تأیید محلی' : 'تأیید محلی روشن است';
   }
 
   function renderStats(s) {
     var codes = s.codes || [];
     var done = codes.filter(function (c) { return c.ran; }).length;
-    $('stat-total').textContent = fa(codes.length);
-    $('stat-done').textContent = fa(done);
-    $('stat-pending').textContent = fa(codes.length - done);
     setBadge('codes', codes.length - done);
     $('codes-count').textContent = codes.length ? fa(codes.length) + ' فایل' : '';
     $('shots-count').textContent = (s.shots || []).length ? fa((s.shots || []).length) + ' تصویر' : '';
@@ -528,7 +479,7 @@
 
     $('status-mode').textContent = s.busy
       ? 'در حال کار: ' + s.busy
-      : (s.auto ? 'حالت خودکار · هر ' + fa(s.auto_total) + ' ثانیه' : 'حالت دستی');
+      : (s.auto ? 'حالت خودکار · بدون تأیید محلی' : 'حالت دستی · تأیید محلی لازم است');
   }
 
   function renderRepo(s) {
@@ -852,13 +803,8 @@
   /* ─────────────────────────────── رویدادها ─────────────────────────────── */
 
   function bind() {
-    $('btn-check').addEventListener('click', function () { act('check_collab'); });
     $('btn-check-2').addEventListener('click', function () { act('check_collab'); });
     $('btn-run-new').addEventListener('click', function () { act('run_new'); });
-    $('btn-shot').addEventListener('click', function () { act('take_screenshot'); });
-    $('btn-report').addEventListener('click', function () { act('open_report'); });
-
-    $('btn-open-codes').addEventListener('click', function () { call('open_path', ['codes']); });
     $('btn-open-shots').addEventListener('click', function () { call('open_path', ['shots']); });
     $('btn-rescan').addEventListener('click', function () {
       call('rescan_codes').then(function (res) { handleResult(res, 'rescan_codes', null); });
@@ -869,20 +815,6 @@
 
     $('auto-switch').addEventListener('change', function () {
       call('toggle_auto').then(function (res) { handleResult(res, 'toggle_auto', null); });
-    });
-
-    function applySyncSeconds() {
-      var input = $('sync-seconds');
-      var value = Math.max(3, Math.min(600, parseInt(input.value, 10) || 10));
-      input.value = value;
-      call('set_sync_seconds', [value]).then(function (res) {
-        handleResult(res, 'set_sync_seconds', null);
-      });
-    }
-
-    $('sync-seconds').addEventListener('change', applySyncSeconds);
-    $('sync-seconds').addEventListener('keydown', function (event) {
-      if (event.key === 'Enter') { event.preventDefault(); applySyncSeconds(); }
     });
 
     $('mute-btn').addEventListener('click', function () {
@@ -1198,7 +1130,6 @@
     setBotSub(savedSub === 'test' || savedSub === 'queue' || savedSub === 'guide' ? savedSub : 'settings');
     tickClock();
     setInterval(tickClock, 1000);
-    requestAnimationFrame(animateRing);
 
     /* صدای اولین کلیک کاربر (WebView تا کلیک اول صدا را پخش نمی‌کند) */
     var unlock = function () { document.removeEventListener('pointerdown', unlock); };

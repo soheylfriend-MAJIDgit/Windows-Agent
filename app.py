@@ -46,7 +46,7 @@ def _read_app_version() -> str:
             return raw
     except (OSError, UnicodeError):
         pass
-    return "1.7-17"
+    return "1.7-18"
 
 APP_VERSION = _read_app_version()
 
@@ -55,9 +55,9 @@ APP_VERSION = _read_app_version()
 #  این مقادیر «نسخه پشتیبان» هستند تا حتی بدون گیت هم چیزی نمایش داده شود.
 # ------------------------------------------------------------------
 BUILD_COMMIT = "d47c91e"
-BUILD_SUBJECT = "v1.7-17: local cancel UI"
+BUILD_SUBJECT = "v1.7-18: brain mode toggle"
 BUILD_DATE_JALALI = "1405/08/03"
-BUILD_TIME_TEHRAN = "13:53"
+BUILD_TIME_TEHRAN = "14:04"
 
 # منطقه زمانی تهران (بدون وابستگی به تنظیمات ویندوز)
 TEHRAN = timezone(timedelta(hours=3, minutes=30), "Tehran")
