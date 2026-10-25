@@ -65,6 +65,13 @@ HTTP_TIMEOUT = 5.0
 BACKOFF_STEPS = (5.0, 15.0, 30.0, 60.0)
 MAX_FEEDBACK_ATTEMPTS = 3
 
+# تنظیمات فاز ۴: PaddleOCR محلی و تاب‌آوری قطعی شبکه
+OCR_HELPER_TIMEOUT = 45.0
+NETWORK_RECHECK_INTERVAL = 60.0
+MAX_NETWORK_OUTAGE_SECONDS = 1800.0
+LOCAL_VISION_SUBDIR = "vision"
+OCR_ALLOWED_ENV_KEYS = ("WINDOWS_AGENT_OCR_PYTHON", "WINDOWS_AGENT_OCR_HELPER")
+
 ALLOWED_COMMAND_TYPES = frozenset({"run_automation", "run_arena_prompt", "sync_and_run_job"})
 FORBIDDEN_PAYLOAD_KEYS = frozenset({"shell", "cmd", "command", "script", "code", "executable", "args", "argv"})
 FORBIDDEN_ENV_KEYS = frozenset({
@@ -133,6 +140,7 @@ STATE_DIR = _resolve_state_dir()
 SECRET_FILE = STATE_DIR / "manager_secret.bin"
 ACTIVE_COMMAND_FILE = STATE_DIR / "active_command.json"
 WORKSPACES_DIR = STATE_DIR / "cmd_workspaces"
+VISION_DIR = STATE_DIR / LOCAL_VISION_SUBDIR
 
 
 def utc_iso_now() -> str:
@@ -683,15 +691,29 @@ def is_tracked_process_alive(pid: int, expected_marker: float | None) -> bool:
     return True
 
 
-def spawn_job_process(job_path: Path, cwd_dir: Path) -> subprocess.Popen:
+def spawn_job_process(
+    job_path: Path,
+    cwd_dir: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.Popen:
     """اجرای فایل کار در Process Group مستقل با محیط پاک‌سازی‌شده (بدون هیچ کلید مدیریتی)."""
     env = {
         k: v
         for k, v in os.environ.items()
-        if k.upper() not in FORBIDDEN_ENV_KEYS and not k.upper().startswith("WAM_AGENT_")
+        if (
+            k.upper() not in FORBIDDEN_ENV_KEYS
+            and not k.upper().startswith("WAM_AGENT_")
+            and k.upper() not in OCR_ALLOWED_ENV_KEYS
+        )
     }
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+
+    if isinstance(extra_env, dict):
+        for key in OCR_ALLOWED_ENV_KEYS:
+            val = extra_env.get(key)
+            if isinstance(val, str) and val.strip():
+                env[key] = val.strip()
 
     kwargs: dict = {
         "cwd": str(cwd_dir),
@@ -754,6 +776,361 @@ def terminate_tree(proc: subprocess.Popen | None, expected_marker: float | None 
     return True
 
 
+# ------------------------------------ PaddleOCR محلی ایزوله و بررسی Preflight ---
+
+_vision_override_python: Path | None = None
+_vision_override_helper: Path | None = None
+_vision_initialized_once: bool = False
+
+
+def get_default_vision_paths(vision_root: Path | None = None) -> tuple[Path, Path, Path]:
+    """مسیرهای استاندارد مفسر پایتون، فایل helper و فیکسچر تست در ``%LOCALAPPDATA%\\Windows-Agent\\vision``."""
+    root = vision_root or VISION_DIR
+    if IS_WINDOWS:
+        py_path = root / ".venv" / "Scripts" / "python.exe"
+    else:
+        py_path = root / ".venv" / "bin" / "python"
+    helper_path = root / "paddle_ocr_helper.py"
+    fixture_path = root / "cache" / "selftest_fixture.png"
+    return py_path, helper_path, fixture_path
+
+
+def set_vision_path_overrides(
+    ocr_python: str | Path | None = None,
+    ocr_helper: str | Path | None = None,
+) -> None:
+    """تنظیم مسیرهای جایگزین OCR (برای تست‌های Preflight، Symlink و Timeout)."""
+    global _vision_override_python, _vision_override_helper
+    _vision_override_python = Path(ocr_python) if ocr_python is not None else None
+    _vision_override_helper = Path(ocr_helper) if ocr_helper is not None else None
+
+
+def ensure_vision_runtime_initialized(force: bool = False) -> dict:
+    """راه‌اندازی اولیه‌ی پوشه ایزوله ``%LOCALAPPDATA%\\Windows-Agent\\vision`` بدون نوشتن هیچ فایلی کنار ``app.py``."""
+    global _vision_initialized_once
+    if _vision_initialized_once and not force:
+        py_p, hlp_p, fix_p = get_default_vision_paths()
+        return {
+            "ok": py_p.exists() and hlp_p.exists() and fix_p.exists(),
+            "vision_root": str(VISION_DIR),
+            "ocr_python": str(py_p),
+            "ocr_helper": str(hlp_p),
+            "fixture": str(fix_p),
+        }
+
+    try:
+        from tools.vision.install_vision import ensure_vision_runtime
+        res = ensure_vision_runtime(install_packages=False, log_fn=lambda *_a, **_k: None)
+        _vision_initialized_once = True
+        return res
+    except Exception as exc:
+        return {
+            "ok": False,
+            "vision_root": str(VISION_DIR),
+            "error": str(exc),
+        }
+
+
+def _is_path_safely_inside_vision(candidate: Path, vision_root: Path | None = None) -> tuple[bool, str]:
+    """بررسی امنیتی مسیر OCR: باید مطلق، موجود و دقیقاً داخل ``%LOCALAPPDATA%\\Windows-Agent\\vision`` باشد (بدون Symlink/Reparse به بیرون)."""
+    root = (vision_root or VISION_DIR).resolve()
+    raw_str = str(candidate or "").strip()
+    if not raw_str:
+        return False, "مسیر فایل OCR خالی است."
+
+    if not candidate.is_absolute():
+        return False, f"مسیر فایل OCR باید مطلق (Absolute) باشد: {candidate}"
+
+    # بررسی عدم وجود اجزای .. در مسیر خام
+    if ".." in candidate.parts:
+        return False, f"مسیر فایل OCR نباید شامل '..' باشد: {candidate}"
+
+    # بررسی Symlink / Reparse point روی خود فایل یا پوشه‌های والد
+    def _is_reparse(path: Path) -> bool:
+        try:
+            if path.is_symlink():
+                return True
+            if IS_WINDOWS:
+                import ctypes
+                attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+                if attrs == 0xFFFFFFFF:
+                    return False
+                return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+            is_junction = getattr(path, "is_junction", None)
+            return bool(is_junction()) if callable(is_junction) else False
+        except Exception:
+            return False
+
+    try:
+        if _is_reparse(candidate):
+            target = candidate.resolve()
+            if not target.is_relative_to(root):
+                return False, f"استفاده از Symlink/Reparse به خارج از پوشه مجاز vision رد شد: {candidate} -> {target}"
+            return False, f"فایل اجرایی/اسکریپت OCR نباید Symlink/Reparse باشد: {candidate}"
+    except OSError as exc:
+        return False, f"خطا در بررسی Symlink مسیر OCR: {exc}"
+
+    if not candidate.exists() or not candidate.is_file():
+        return False, f"فایل مورد نیاز OCR وجود ندارد: {candidate}"
+
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        return False, f"خطا در بازگشایی مسیر واقعی OCR: {exc}"
+
+    if not resolved.is_relative_to(root) or root not in resolved.parents:
+        return False, f"مسیر فایل OCR خارج از پوشه مجاز {root} است: {resolved}"
+
+    # بررسی والدها بین resolved و root برای اطمینان از نبود Reparse/Symlink به بیرون
+    cur = candidate
+    while cur != cur.parent and cur != root:
+        if _is_reparse(cur):
+            target = cur.resolve()
+            if not target.is_relative_to(root):
+                return False, f"یکی از پوشه‌های والد OCR از نوع Symlink/Reparse خارج‌شونده است: {cur} -> {target}"
+            return False, f"یکی از پوشه‌های والد OCR از نوع Symlink/Reparse است: {cur}"
+        cur = cur.parent
+
+    return True, ""
+
+
+def invoke_local_ocr(
+    image_path: str | Path,
+    ocr_python: Path | None = None,
+    ocr_helper: Path | None = None,
+    timeout: float = OCR_HELPER_TIMEOUT,
+    offline: bool = True,
+) -> tuple[bool, dict, str]:
+    """اجرای امن ``paddle_ocr_helper.py`` با سقف زمانی <= ۴۵ ثانیه و توقف درخت فرآیند در صورت Timeout."""
+    def_py, def_hlp, _ = get_default_vision_paths()
+    py_exe = ocr_python or _vision_override_python or def_py
+    hlp_script = ocr_helper or _vision_override_helper or def_hlp
+
+    ok_py, err_py = _is_path_safely_inside_vision(py_exe)
+    if not ok_py:
+        return False, {}, err_py
+
+    ok_hlp, err_hlp = _is_path_safely_inside_vision(hlp_script)
+    if not ok_hlp:
+        return False, {}, err_hlp
+
+    img_p = Path(str(image_path or "").strip())
+    existed_before = img_p.exists() and img_p.is_file()
+
+    bounded_timeout = max(0.2, min(float(timeout or OCR_HELPER_TIMEOUT), OCR_HELPER_TIMEOUT))
+
+    clean_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k.upper() not in FORBIDDEN_ENV_KEYS and not k.upper().startswith("WAM_AGENT_")
+    }
+    clean_env["PYTHONIOENCODING"] = "utf-8"
+    clean_env["PYTHONUTF8"] = "1"
+    if offline:
+        clean_env["WINDOWS_AGENT_OCR_OFFLINE"] = "1"
+
+    cmd_args = [str(py_exe), "-u", str(hlp_script), "--image", str(image_path), "--json"]
+    if offline:
+        cmd_args.append("--offline")
+
+    kwargs: dict = {
+        "cwd": str(VISION_DIR),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "env": clean_env,
+    }
+    if IS_WINDOWS:
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | getattr(
+            subprocess, "CREATE_NO_WINDOW", 0x08000000
+        )
+        kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd_args, **kwargs)
+    start_marker = _get_process_start_marker(int(proc.pid))
+    try:
+        stdout_raw, stderr_raw = proc.communicate(timeout=bounded_timeout)
+    except subprocess.TimeoutExpired:
+        terminate_tree(proc, start_marker)
+        return (
+            False,
+            {"timedOut": True, "pid": proc.pid},
+            f"اجرای PaddleOCR محلی پس از {bounded_timeout} ثانیه دچار Timeout شد و درخت فرآیند متوقف گردید.",
+        )
+
+    if existed_before and not img_p.exists():
+        return False, {}, "خطای امنیتی: فایل تصویر ورودی نباید توسط helper حذف شود."
+
+    raw_out = (stdout_raw or "").strip()
+    if not raw_out:
+        err_tail = (stderr_raw or "").strip()[-300:]
+        return False, {}, f"خروجی JSON از paddle_ocr_helper دریافت نشد (exit={proc.returncode}): {err_tail}"
+
+    try:
+        parsed = json.loads(raw_out)
+    except ValueError as exc:
+        return False, {}, f"خروجی stdout در paddle_ocr_helper یک JSON معتبر نیست: {exc}"
+
+    if not isinstance(parsed, dict):
+        return False, {}, "ساختار JSON خروجی paddle_ocr_helper باید یک شیء دیکشنری باشد."
+
+    if proc.returncode != 0 or not parsed.get("ok"):
+        err_msg = str(parsed.get("error") or (stderr_raw or "").strip() or f"exit code {proc.returncode}")
+        return False, parsed, err_msg
+
+    if parsed.get("engine") != "paddleocr":
+        return False, parsed, f"موتور OCR نامعتبر است: {parsed.get('engine')}"
+
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        return False, parsed, "فیلد items در خروجی OCR باید لیست باشد."
+
+    for item in items:
+        if not isinstance(item, dict):
+            return False, parsed, "هر آیتم در items باید دیکشنری باشد."
+        txt = item.get("text")
+        conf = item.get("confidence")
+        bounds = item.get("bounds")
+        if not isinstance(txt, str) or not txt.strip():
+            return False, parsed, "فیلد text در آیتم OCR معتبر نیست."
+        if not isinstance(conf, (int, float)) or not (0.0 <= float(conf) <= 1.0):
+            return False, parsed, f"مقدار confidence خارج از بازه [0, 1] است: {conf}"
+        if (
+            not isinstance(bounds, list)
+            or len(bounds) != 4
+            or not all(isinstance(v, (int, float)) for v in bounds)
+        ):
+            return False, parsed, f"مختصات bounds باید آرایه ۴تایی [left, top, right, bottom] باشد: {bounds}"
+
+    return True, parsed, ""
+
+
+def verify_vision_preflight(
+    ocr_python: Path | None = None,
+    ocr_helper: Path | None = None,
+    timeout: float = 15.0,
+) -> tuple[bool, dict, str]:
+    """بررسی Preflight پیش از اجرای ``job_arena.py``: صحت مسیرها، عدم فرار با Symlink و اجرای Self-test روی تصویر تست محلی."""
+    def_py, def_hlp, fixture_path = get_default_vision_paths()
+    py_exe = ocr_python or _vision_override_python or def_py
+    hlp_script = ocr_helper or _vision_override_helper or def_hlp
+
+    ok_py, err_py = _is_path_safely_inside_vision(py_exe)
+    if not ok_py:
+        return False, {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)}, err_py
+
+    ok_hlp, err_hlp = _is_path_safely_inside_vision(hlp_script)
+    if not ok_hlp:
+        return False, {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)}, err_hlp
+
+    if not fixture_path.exists():
+        return False, {}, "تصویر فیکسچر OCR موجود نیست؛ نصب ایزوله را با tools/vision/install_vision.py --install-packages تکمیل کنید."
+
+    ok_run, ocr_data, err_run = invoke_local_ocr(
+        fixture_path,
+        ocr_python=py_exe,
+        ocr_helper=hlp_script,
+        timeout=timeout,
+        offline=True,
+    )
+    if not ok_run:
+        return (
+            False,
+            {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)},
+            f"تست اولیه (Self-test) PaddleOCR محلی ناموفق بود: {err_run}",
+        )
+
+    items = ocr_data.get("items") or []
+    if not items:
+        return (
+            False,
+            {"ocr_python": str(py_exe), "ocr_helper": str(hlp_script)},
+            "خروجی Self-test در PaddleOCR محلی خالی بود (هیچ متنی تشخیص داده نشد).",
+        )
+
+    info = {
+        "engine": "paddleocr",
+        "localOnly": True,
+        "ocr_python": str(py_exe.resolve()),
+        "ocr_helper": str(hlp_script.resolve()),
+        "itemsCount": len(items),
+        "sample": items[:4],
+    }
+    with _lock:
+        _runtime_info["arena_vision_ocr_ready"] = True
+        _runtime_info["ocr_engine"] = "paddleocr"
+        _runtime_info["ocr_local_only"] = True
+    return True, info, ""
+
+
+def is_vision_ready() -> bool:
+    """آیا PaddleOCR محلی واقعاً آماده و از بررسی Preflight عبور کرده است؟"""
+    ok, _, _ = verify_vision_preflight(timeout=10.0)
+    return ok
+
+
+# ------------------------------------ تاب‌آوری قطعی شبکه (Network Resilience) ---
+
+_network_probe_override = None
+_network_recheck_interval: float = NETWORK_RECHECK_INTERVAL
+_local_cancel_event = threading.Event()
+_local_cancel_reason: str = ""
+
+
+def set_network_probe_override(probe_fn, recheck_interval: float | None = None) -> None:
+    """تنظیم تابع شبیه‌ساز وضعیت شبکه و فاصله‌ی بررسی مجدد (برای تست‌های خودکار قطعی و وصل مجدد اینترنت)."""
+    global _network_probe_override, _network_recheck_interval
+    _network_probe_override = probe_fn
+    if recheck_interval is not None:
+        _network_recheck_interval = max(0.05, float(recheck_interval))
+    else:
+        _network_recheck_interval = NETWORK_RECHECK_INTERVAL
+
+
+def request_local_cancel(reason: str = "توقف فوری توسط کاربر در ویندوز") -> None:
+    """درخواست لغو محلی فوری از سمت کاربر ویندوز (حتی در زمان قطعی کامل اینترنت)."""
+    global _local_cancel_reason
+    with _lock:
+        _local_cancel_reason = str(reason or "توقف فوری توسط کاربر در ویندوز")
+    _local_cancel_event.set()
+
+
+def clear_local_cancel() -> None:
+    """پاک کردن پرچم لغو محلی پیش از شروع فرمان جدید."""
+    global _local_cancel_reason
+    with _lock:
+        _local_cancel_reason = ""
+    _local_cancel_event.clear()
+
+
+def probe_network_health(base_url: str, agent_key: str, timeout: float = HTTP_TIMEOUT) -> bool:
+    """بررسی سبک و سریع سلامت ارتباط با API ایجنت مدیریت با Timeout محدود."""
+    if _network_probe_override is not None:
+        try:
+            return bool(_network_probe_override(base_url, agent_key))
+        except Exception:
+            return False
+
+    bounded = max(0.5, min(float(timeout or HTTP_TIMEOUT), HTTP_TIMEOUT))
+    ok, code, _ = _http_json("GET", f"{base_url}/connection-test", agent_key, None, timeout=bounded)
+    if ok or code in (200, 401, 403, 404, 409):
+        return True
+    return False
+
+
+def is_network_resilience_ready() -> bool:
+    """قابلیت تنها پس از آزمون انتهابه‌انتها در Windows واقعی اعلام می‌شود.
+
+    پیاده‌سازی پایش API مدیریت موجود است؛ تا وقتی pause/resume امنِ UI و آزمون لغو محلی
+    با Arena Bridge 7 روی Windows واقعی تأیید نشده، capability عمداً false می‌ماند.
+    """
+    return bool(_runtime_info.get("network_resilience_ready", False)) and callable(probe_network_health) and (_network_recheck_interval > 0)
+
+
 # ------------------------------------ وضعیت حافظه و نخ پس‌زمینه ---
 
 _lock = threading.Lock()
@@ -779,6 +1156,10 @@ _runtime_info: dict = {
     "last_command_id": "",
     "last_command_status": "",
     "last_error": "",
+    "arena_vision_ocr_ready": False,
+    "network_resilience_ready": False,
+    "ocr_engine": "paddleocr",
+    "ocr_local_only": True,
 }
 
 
@@ -833,7 +1214,7 @@ def _refresh_secret_cache(api) -> dict | None:
 
 
 def _build_heartbeat_payload(api, agent_id: str) -> dict:
-    version = "1.7-6"
+    version = "1.7-7"
     commit = ""
     auto_mode = False
     busy = None
@@ -858,6 +1239,8 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
     else:
         busy = active_cmd
 
+    vision_ready = bool(_runtime_info.get("arena_vision_ocr_ready", False))
+    network_ready = bool(is_network_resilience_ready())
     return {
         "agentId": agent_id,
         "name": DEFAULT_AGENT_NAME,
@@ -874,6 +1257,11 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
             "telegram_queue": True,
             "command_plane": True,
             "d1_automations": True,
+            # OCR تا پس از نصب/گرم‌سازی و self-test آفلاین واقعی true نمی‌شود.
+            "arena_vision_ocr": vision_ready,
+            "network_resilience": network_ready,
+            "ocr_engine": "paddleocr",
+            "ocr_local_only": True,
         },
         "state": {
             "auto_mode": auto_mode,
@@ -1120,6 +1508,9 @@ class _CommandSession:
         self.cancel_reason = ""
         self.emitted_stages: set[str] = set()
         self.last_progress_mono = time.monotonic()
+        self.network_paused = False
+        self.network_pause_started: float | None = None
+        self.last_network_probe = 0.0
 
     def next_seq(self) -> int:
         self.seq = min(999_999, self.seq + 1)
@@ -1760,8 +2151,45 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                     _runtime_info["last_command_status"] = "failed"
                 return "failed"
 
-        # ۴. شروع فرآیند در Process Group مستقل
-        proc = spawn_job_process(synced_path, run_cwd)
+        # ۴. برای Arena فقط: PaddleOCR محلی باید از self-test آفلاین عبور کند.
+        arena_ocr_enabled = (job_name == "job_arena.py")
+        arena_env: dict[str, str] = {}
+        if arena_ocr_enabled:
+            ok_ocr, ocr_info, ocr_error = verify_vision_preflight(timeout=15.0)
+            if not ok_ocr:
+                session.emit_event(
+                    "ocr_preflight_failed",
+                    f"PaddleOCR محلی آماده نشد؛ فرمان Arena پیش از اجرا متوقف شد: {ocr_error}",
+                    level="fatal",
+                    data={"engine": "paddleocr", "localOnly": True},
+                )
+                session.update_state(
+                    "failed",
+                    "ocr_preflight_failed",
+                    "PaddleOCR محلی آماده نیست. پس از نصب دستی و self-test موفق، دوباره تلاش کنید.",
+                    error=ocr_error,
+                    result={"engine": "paddleocr", "localOnly": True},
+                )
+                with _lock:
+                    _runtime_info["last_command_status"] = "failed"
+                return "failed"
+            ocr_python = str(ocr_info["ocr_python"])
+            ocr_helper = str(ocr_info["ocr_helper"])
+            # دو مسیر فقط در subprocess اتوماسیون Arena تزریق می‌شوند؛ هیچ secretی وجود ندارد.
+            arena_env = {
+                "WINDOWS_AGENT_OCR_PYTHON": ocr_python,
+                "WINDOWS_AGENT_OCR_HELPER": ocr_helper,
+            }
+            session.emit_event(
+                "ocr_ready",
+                "PaddleOCR محلی آماده است.",
+                level="info",
+                data={"engine": "paddleocr", "localOnly": True},
+            )
+
+        clear_local_cancel()
+        # ۵. شروع فرآیند در Process Group مستقل
+        proc = spawn_job_process(synced_path, run_cwd, extra_env=arena_env)
         pid = int(proc.pid)
         start_marker = _get_process_start_marker(pid)
         started_mono = time.monotonic()
@@ -1850,6 +2278,31 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             elapsed = now_mono - started_mono
             idle_secs = now_mono - session.last_progress_mono
 
+            # پایش سبک مستقل Manager؛ job_arena.py خودش URL Arena را جداگانه می‌سنجد.
+            if now_mono - session.last_network_probe >= 5.0:
+                session.last_network_probe = now_mono
+                manager_online = probe_network_health(session.base_url, session.agent_key, timeout=2.0)
+                if not manager_online and not session.network_paused:
+                    session.network_paused = True
+                    session.network_pause_started = now_mono
+                    session.emit_event(
+                        "network_paused",
+                        "ارتباط با API ایجنت مدیریت قطع است؛ شمارش بی‌پیشرفتی متوقف شد. job باید تا بازگشت اینترنت هیچ تعامل تازه‌ای با Arena نکند.",
+                        level="warning",
+                        data={"retryAfterSeconds": NETWORK_RECHECK_INTERVAL},
+                    )
+                elif manager_online and session.network_paused:
+                    outage = max(0.0, now_mono - (session.network_pause_started or now_mono))
+                    session.network_paused = False
+                    session.network_pause_started = None
+                    session.last_progress_mono += outage
+                    session.emit_event(
+                        "network_resumed",
+                        "ارتباط با API مدیریت برگشت؛ اجرای job از آخرین مرحله امن ادامه می‌یابد.",
+                        level="info",
+                        data={"outageSeconds": round(outage, 1)},
+                    )
+
             if elapsed > session.timeout_seconds:
                 timed_out_reason = f"زمان اجرای فرمان از سقف مجاز ({int(session.timeout_seconds)} ثانیه) گذشت."
                 terminate_tree(proc, start_marker)
@@ -1862,7 +2315,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 )
                 break
 
-            if idle_secs > session.no_progress_seconds:
+            if not session.network_paused and idle_secs > session.no_progress_seconds:
                 timed_out_reason = f"به مدت {int(session.no_progress_seconds)} ثانیه هیچ پیشرفتی از فرآیند ثبت نشد."
                 terminate_tree(proc, start_marker)
                 session.emit_event(
@@ -2000,11 +2453,37 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 pass
 
 
+def wait_for_manager_network(api, cfg: dict) -> bool:
+    """تا بازگشت API مدیریت هر ۶۰ ثانیه صبر می‌کند؛ لغو محلی در <=۲ ثانیه پذیرفته می‌شود."""
+    announced = False
+    while not _stop_event.is_set():
+        if _local_cancel_event.is_set():
+            return False
+        if probe_network_health(cfg["base_url"], cfg["agent_key"], timeout=2.0):
+            if announced:
+                try:
+                    api.log("اتصال ایجنت مدیریت برگشت؛ ادامه از آخرین مرحله امن")
+                except Exception:
+                    pass
+            return True
+        if not announced and api is not None:
+            try:
+                api.log("اتصال ایجنت مدیریت قطع است؛ تعامل تازه‌ای با Arena آغاز نمی‌شود")
+            except Exception:
+                pass
+        announced = True
+        _local_cancel_event.wait(NETWORK_RECHECK_INTERVAL)
+    return False
+
+
 def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
-    """اگر برنامه مشغول نیست، یک فرمان از ``POST /commands/claim`` می‌گیرد و اجرا می‌کند."""
+    """اگر برنامه مشغول نیست، اتصال را می‌سنجد، سپس یک فرمان را claim و اجرا می‌کند."""
     cfg = cfg or _refresh_secret_cache(api)
     if not cfg:
         return False, "no_secret"
+
+    if not probe_network_health(cfg["base_url"], cfg["agent_key"], timeout=2.0):
+        return False, "network_error"
 
     if api is not None and getattr(api, "busy", None) is not None:
         return True, "busy"
@@ -2129,6 +2608,14 @@ def _worker_loop() -> None:
             last_claim = time.monotonic()
             if not ok_c and status_c in ("auth_401", "auth_403"):
                 auth_blocked = True
+                continue
+            if status_c == "network_error" and not probe_network_health(cfg["base_url"], cfg["agent_key"], timeout=2.0):
+                _local_cancel_event.wait(NETWORK_RECHECK_INTERVAL)
+                if _local_cancel_event.is_set():
+                    clear_local_cancel()
+                last_hb = 0.0
+                last_poll = 0.0
+                last_claim = 0.0
                 continue
             if status_c not in ("idle", "busy", "no_secret", "network_error"):
                 last_hb = 0.0

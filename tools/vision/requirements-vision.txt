@@ -1,0 +1,7 @@
+# وابستگی‌های ایزوله PaddleOCR (نسخه CPU)
+# این فایل فقط داخل محیط مجازی مجزای زیر نصب می‌شود و به Python اصلی برنامه نشت نمی‌کند:
+#   %LOCALAPPDATA%\Windows-Agent\vision\.venv
+paddlepaddle==2.6.2
+paddleocr==2.8.1
+pillow==10.4.0
+numpy==1.26.4
