@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher  (v1.7-8 — build identity + optional local OCR installer)
+rem  Windows Agent launcher (v1.7-9 - build identity + optional local OCR installer)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================
@@ -73,10 +73,10 @@ set "VISION_ROOT=%LOCALAPPDATA%\Windows-Agent\vision"
 if exist "%VISION_ROOT%\.venv\Scripts\python.exe" if exist "%VISION_ROOT%\paddle_ocr_helper.py" if exist "%VISION_ROOT%\vision_ready.json" set "VISION_READY=1"
 if not defined VISION_READY (
     echo.
-    echo PaddleOCR محلی هنوز نصب یا آزمون آفلاین نشده است.
-    echo این قابلیت اختیاری است؛ Windows Agent بدون آن هم باز می‌شود،
-    echo اما اجرای پرامپت Arena تا آماده‌شدن هر دو قابلیت فعال نخواهد بود.
-    choice /C YN /N /M "آیا فایل نصب ایزوله‌ی PaddleOCR اجرا شود؟ (دانلود اولیه مدل نیاز به اینترنت دارد) [Y/N]: "
+    echo Local PaddleOCR is not installed or has not passed its offline self-test.
+    echo This feature is optional; Windows Agent will still start without OCR.
+    echo Arena prompt execution stays disabled until OCR and network checks are verified.
+    choice /C YN /N /M "Run the isolated PaddleOCR installer? Initial model download needs internet [Y/N]: "
     if not errorlevel 2 (
         call "%~dp0install_vision.bat"
     )
