@@ -107,6 +107,15 @@ def ensure_vision_runtime(install_packages: bool = False, log_fn=print) -> dict:
     fixture_path = get_fixture_path(vision_root)
 
     if install_packages and REQUIREMENTS_SOURCE.exists():
+        if not (3, 9) <= sys.version_info[:2] <= (3, 11):
+            return {
+                "ok": False,
+                "vision_root": str(vision_root),
+                "error": (
+                    f"Python {sys.version_info.major}.{sys.version_info.minor} برای نسخه‌های pin شده‌ی PaddlePaddle مناسب نیست؛ "
+                    "این نصب‌کننده به Python 3.9 تا 3.11 نیاز دارد. نصب را با Python 3.11 اجرا کنید."
+                ),
+            }
         log_fn(
             "در حال نصب و دانلود اولیه‌ی مدل‌های محلی PaddleOCR در محیط ایزوله "
             f"({vision_root})... پس از این مرحله، تشخیص متن کاملاً آفلاین انجام می‌شود."

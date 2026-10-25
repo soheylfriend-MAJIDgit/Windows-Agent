@@ -37,7 +37,18 @@ from pathlib import Path
 # ---------------------------------------------------------------- تنظیمات ---
 
 APP_TITLE = "Windows Agent"
-APP_VERSION = "1.7-4"
+
+def _read_app_version() -> str:
+    """شماره نسخه از version.txt خوانده می‌شود تا شناسه نسخه‌ی رابط از فایل نسخه عقب نماند."""
+    try:
+        raw = (Path(__file__).resolve().parent / "version.txt").read_text(encoding="utf-8").strip()
+        if raw and len(raw) <= 32:
+            return raw
+    except (OSError, UnicodeError):
+        pass
+    return "1.7-8"
+
+APP_VERSION = _read_app_version()
 
 # ------------------------------------------------------------------
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
@@ -287,8 +298,9 @@ def build_info() -> dict:
                 commit=str(stamp["version"]),
                 date=stamp.get("date", info["date"]),
                 time=stamp.get("time", info["time"]),
+                subject=stamp.get("subject", info["subject"]),
                 source="stamp",
-                source_label="بروزرسانی خودکار",
+                source_label="اجرای run.bat",
             )
             return info
     except (OSError, ValueError):

@@ -981,7 +981,9 @@ html[data-theme='light'] .play-btn:hover { color: #fff; }
 }
 
 @media (max-width: 1020px) {
-  .build-table { display: none; }
+  /* شناسنامه ساخت در همه اندازه‌ها باید قابل مشاهده بماند. */
+  .build-table { display: table; font-size: 9px; }
+  .build-table th, .build-table td { padding: 1px 4px; }
 }
 
 @media (max-width: 900px) {

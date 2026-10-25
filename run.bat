@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher  (v1.6 — web UI with pywebview)
+rem  Windows Agent launcher  (v1.7-8 — build identity + optional local OCR installer)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================
@@ -64,7 +64,25 @@ if defined MISSING (
     echo.
 )
 
-rem --- 3) WebView2 Runtime (the browser engine of the window) ----------
+rem --- 3) Keep the visible build identity current --------------------
+%PY_CMD% "%~dp0tools\update_build_stamp.py"
+
+rem --- 4) Optional isolated PaddleOCR install (explicit user consent) --
+set "VISION_READY="
+set "VISION_ROOT=%LOCALAPPDATA%\Windows-Agent\vision"
+if exist "%VISION_ROOT%\.venv\Scripts\python.exe" if exist "%VISION_ROOT%\paddle_ocr_helper.py" if exist "%VISION_ROOT%\vision_ready.json" set "VISION_READY=1"
+if not defined VISION_READY (
+    echo.
+    echo PaddleOCR محلی هنوز نصب یا آزمون آفلاین نشده است.
+    echo این قابلیت اختیاری است؛ Windows Agent بدون آن هم باز می‌شود،
+    echo اما اجرای پرامپت Arena تا آماده‌شدن هر دو قابلیت فعال نخواهد بود.
+    choice /C YN /N /M "آیا فایل نصب ایزوله‌ی PaddleOCR اجرا شود؟ (دانلود اولیه مدل نیاز به اینترنت دارد) [Y/N]: "
+    if not errorlevel 2 (
+        call "%~dp0install_vision.bat"
+    )
+)
+
+rem --- 5) WebView2 Runtime (the browser engine of the window) ----------
 set "WEBVIEW2="
 reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>nul && set "WEBVIEW2=1"
 if not defined WEBVIEW2 reg query "HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>nul && set "WEBVIEW2=1"
