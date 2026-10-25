@@ -175,6 +175,7 @@
   var collabDirty = false;
   var botDirty = false;
   var mgrDirty = false;
+  var localCancelSubmitting = false;
   var sig = { codes: '', shots: '', log: '', paths: '', chips: '', fields: '', queue: '' };
   var pendingConfirm = null;
 
@@ -565,6 +566,20 @@
       mgrBadge.className = 'chip ' + (mgr.connected ? 'ok' : (mgrNote === 'کلید نامعتبر' || mgrNote === 'دسترسی ناکافی' ? 'bad' : 'due'));
     }
 
+    var cancelButton = $('mgr-cancel-local');
+    var cancelStatus = $('mgr-cancel-status');
+    var activeCommand = !!mgr.active_command_id;
+    if (!activeCommand) localCancelSubmitting = false;
+    var cancelPending = activeCommand && (!!mgr.local_cancel_requested || localCancelSubmitting);
+    if (cancelButton) {
+      cancelButton.disabled = !activeCommand || cancelPending;
+      cancelButton.textContent = cancelPending ? 'در حال توقف…' : 'توقف فوری اجرای فعال';
+    }
+    if (cancelStatus) {
+      cancelStatus.textContent = !activeCommand ? 'فرمان فعالی نیست'
+        : (cancelPending ? 'درخواست لغو محلی ثبت شد' : 'فقط هنگام اجرای فرمان فعال است');
+    }
+
     if (!mgrDirty && mgr.base_url) {
       setVal('mgr-base-url', mgr.base_url);
     }
@@ -928,6 +943,25 @@
     $('mgr-sync').addEventListener('click', function () {
       call('manager_sync_now').then(function (res) {
         handleResult(res, 'manager_sync_now', null);
+      });
+    });
+
+    $('mgr-cancel-local').addEventListener('click', function () {
+      if (localCancelSubmitting || $('mgr-cancel-local').disabled) return;
+      if (!window.confirm('فرمان فعال متوقف می‌شود. آیا ادامه می‌دهی؟')) return;
+      localCancelSubmitting = true;
+      $('mgr-cancel-local').disabled = true;
+      $('mgr-cancel-local').textContent = 'در حال توقف…';
+      $('mgr-cancel-status').textContent = 'درخواست لغو محلی…';
+      call('manager_cancel_local').then(function (res) {
+        var manager = res && res.state && res.state.manager;
+        if (!manager || !manager.local_cancel_requested || !manager.active_command_id) {
+          localCancelSubmitting = false;
+        }
+        if (res && res.ok === false) {
+          $('mgr-cancel-status').textContent = 'فرمان فعالی برای لغو نیست';
+        }
+        handleResult(res, 'manager_cancel_local', null);
       });
     });
 

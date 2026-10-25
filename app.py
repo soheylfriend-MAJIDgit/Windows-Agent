@@ -46,7 +46,7 @@ def _read_app_version() -> str:
             return raw
     except (OSError, UnicodeError):
         pass
-    return "1.7-15"
+    return "1.7-17"
 
 APP_VERSION = _read_app_version()
 
@@ -55,9 +55,9 @@ APP_VERSION = _read_app_version()
 #  این مقادیر «نسخه پشتیبان» هستند تا حتی بدون گیت هم چیزی نمایش داده شود.
 # ------------------------------------------------------------------
 BUILD_COMMIT = "d47c91e"
-BUILD_SUBJECT = "v0.4-dev: Arena Bridge"
-BUILD_DATE_JALALI = "1405/08/01"
-BUILD_TIME_TEHRAN = "23:26"
+BUILD_SUBJECT = "v1.7-17: local cancel UI"
+BUILD_DATE_JALALI = "1405/08/03"
+BUILD_TIME_TEHRAN = "13:53"
 
 # منطقه زمانی تهران (بدون وابستگی به تنظیمات ویندوز)
 TEHRAN = timezone(timedelta(hours=3, minutes=30), "Tehran")
@@ -2303,6 +2303,23 @@ class Api:
         except Exception as exc:
             self.log(f"⚠️ خطا در بیدار کردن کلاینت مدیریت: {exc}")
         return self.get_state()
+
+    def manager_cancel_local(self) -> dict:
+        """لغو فوری فرمان فعال بدون درخواست اینترنتی؛ callback فقط پرچم محلی را تنظیم می‌کند."""
+        try:
+            import manager_client
+            if not manager_client.get_view_state().get("active_command_id"):
+                self.toast("فرمان فعالی برای لغو نیست", "error")
+                return {"ok": False, "state": self.get_state()}
+            first_request = manager_client.request_local_cancel("لغو فوری توسط کاربر از داخل Windows Agent")
+            if first_request:
+                self.log("درخواست توقف محلی ثبت شد؛ درخت فرایند فعال متوقف می‌شود.")
+                self.toast("درخواست توقف محلی ثبت شد")
+            return {"ok": True, "state": self.get_state()}
+        except Exception as exc:
+            self.log(f"لغو محلی ممکن نشد: {exc}")
+            self.toast("لغو محلی ممکن نشد", "error")
+            return {"ok": False, "state": self.get_state()}
 
     def manager_clear_config(self) -> dict:
         """حذف کلید ذخیره‌شده ایجنت مدیریت."""

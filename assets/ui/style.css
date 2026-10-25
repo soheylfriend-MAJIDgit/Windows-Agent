@@ -490,6 +490,7 @@ html[data-theme='light'] .btn-primary { color: #fff; }
 
 .row-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row-actions.wide { justify-content: flex-start; }
+.local-cancel-actions { margin-top: 10px; }
 
 .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .actions-card { padding-bottom: 18px; }

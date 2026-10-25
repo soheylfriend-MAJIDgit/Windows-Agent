@@ -736,13 +736,19 @@ def spawn_job_process(
     return subprocess.Popen([sys.executable, "-u", str(job_path)], **kwargs)
 
 
-def terminate_tree(proc: subprocess.Popen | None, expected_marker: float | None = None) -> bool:
-    """توقف کامل درخت فرآیند (Process Tree) با ``taskkill /PID <pid> /T /F`` پس از تأیید هویت PID."""
+def terminate_tree(
+    proc: subprocess.Popen | None,
+    expected_marker: float | None = None,
+    timeout_seconds: float = 20.0,
+) -> bool:
+    """توقف درخت فرآیند با taskkill یا process group، با سقف زمانی اختیاری."""
     if proc is None:
         return False
     if proc.poll() is not None:
         return True
 
+    deadline = max(0.1, float(timeout_seconds))
+    started = time.monotonic()
     pid = int(proc.pid)
     if expected_marker is not None and not is_tracked_process_alive(pid, expected_marker):
         return False
@@ -753,7 +759,7 @@ def terminate_tree(proc: subprocess.Popen | None, expected_marker: float | None 
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=max(0.1, min(15.0, deadline * 0.75)),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception:
@@ -767,9 +773,16 @@ def terminate_tree(proc: subprocess.Popen | None, expected_marker: float | None 
             except Exception:
                 pass
 
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+    remaining = max(0.0, deadline - (time.monotonic() - started))
+    if remaining > 0:
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
         try:
             proc.kill()
         except Exception:
@@ -1108,6 +1121,7 @@ _network_probe_override = None
 _network_recheck_interval: float = NETWORK_RECHECK_INTERVAL
 _local_cancel_event = threading.Event()
 _local_cancel_reason: str = ""
+_local_cancel_requested_at: float = 0.0
 
 
 def set_network_probe_override(probe_fn, recheck_interval: float | None = None) -> None:
@@ -1120,20 +1134,25 @@ def set_network_probe_override(probe_fn, recheck_interval: float | None = None) 
         _network_recheck_interval = NETWORK_RECHECK_INTERVAL
 
 
-def request_local_cancel(reason: str = "توقف فوری توسط کاربر در ویندوز") -> None:
-    """درخواست لغو محلی فوری از سمت کاربر ویندوز (حتی در زمان قطعی کامل اینترنت)."""
-    global _local_cancel_reason
+def request_local_cancel(reason: str = "توقف فوری توسط کاربر در ویندوز") -> bool:
+    """درخواست لغو محلی فوری و idempotent؛ حتی هنگام قطعی کامل اینترنت."""
+    global _local_cancel_reason, _local_cancel_requested_at
     with _lock:
+        if _local_cancel_event.is_set():
+            return False
         _local_cancel_reason = str(reason or "توقف فوری توسط کاربر در ویندوز")
-    _local_cancel_event.set()
+        _local_cancel_requested_at = time.monotonic()
+        _local_cancel_event.set()
+    return True
 
 
 def clear_local_cancel() -> None:
     """پاک کردن پرچم لغو محلی پیش از شروع فرمان جدید."""
-    global _local_cancel_reason
+    global _local_cancel_reason, _local_cancel_requested_at
     with _lock:
         _local_cancel_reason = ""
-    _local_cancel_event.clear()
+        _local_cancel_requested_at = 0.0
+        _local_cancel_event.clear()
 
 
 def probe_network_health(base_url: str, agent_key: str, timeout: float = HTTP_TIMEOUT) -> bool:
@@ -1221,7 +1240,9 @@ def _set_manager_status(api, connected: bool, note: str, error_msg: str = "") ->
 def get_view_state() -> dict:
     """اطلاعات غیرحساس وضعیت کلاینت مدیریت برای نمایش در UI (بدون هیچ کار شبکه‌ای یا دیسکی سنگین)."""
     with _lock:
-        return dict(_runtime_info)
+        view = dict(_runtime_info)
+        view["local_cancel_requested"] = _local_cancel_event.is_set()
+        return view
 
 
 def _refresh_secret_cache(api) -> dict | None:
@@ -2209,7 +2230,6 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
     cmd_id = session.cmd_id
     if not cmd_id:
         return "invalid"
-    clear_local_cancel()
 
     with _lock:
         _active_command_id = cmd_id
@@ -2523,7 +2543,13 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 session.cancel_reason = local_reason
 
             if session.cancel_requested or _stop_event.is_set():
-                terminate_tree(proc, start_marker)
+                if _local_cancel_event.is_set():
+                    with _lock:
+                        requested_at = _local_cancel_requested_at or time.monotonic()
+                    remaining = max(0.1, 2.0 - (time.monotonic() - requested_at))
+                    terminate_tree(proc, start_marker, timeout_seconds=remaining)
+                else:
+                    terminate_tree(proc, start_marker)
                 break
 
             if proc.poll() is not None and eof_reached and out_queue.empty():
@@ -2682,6 +2708,8 @@ def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
         if _active_command_id is not None:
             return True, "busy"
 
+    # Reset a previous request before claiming; do not clear again after active_command_id is exposed to UI.
+    clear_local_cancel()
     ok, code, data = _http_json(
         "POST",
         f"{cfg['base_url']}/commands/claim",
