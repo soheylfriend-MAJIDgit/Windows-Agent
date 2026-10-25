@@ -1767,13 +1767,18 @@ class _CommandSession:
         )
 
     def poll_control(self) -> bool:
-        """بررسی ``GET /commands/{id}`` برای دریافت ``cancelRequested`` و مقادیر به‌روز timeout."""
+        """بررسی لغو محلی بی‌درنگ، سپس دریافت کنترل از سرور با timeout کوتاه."""
+        if _local_cancel_event.is_set():
+            with _lock:
+                self.cancel_reason = _local_cancel_reason or "لغو محلی توسط کاربر ویندوز"
+            self.cancel_requested = True
+            return True
         ok, _, data = _http_json(
             "GET",
             f"{self.base_url}/commands/{self.cmd_id}",
             self.agent_key,
             None,
-            timeout=HTTP_TIMEOUT,
+            timeout=0.6,
         )
         if ok and isinstance(data, dict):
             if data.get("cancelRequested"):
@@ -2460,7 +2465,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             # پایش سبک مستقل Manager؛ job_arena.py خودش URL Arena را جداگانه می‌سنجد.
             if now_mono - session.last_network_probe >= 5.0:
                 session.last_network_probe = now_mono
-                manager_online = probe_network_health(session.base_url, session.agent_key, timeout=2.0)
+                manager_online = probe_network_health(session.base_url, session.agent_key, timeout=0.75)
                 if not manager_online and not session.network_paused:
                     session.network_paused = True
                     session.network_pause_started = now_mono
