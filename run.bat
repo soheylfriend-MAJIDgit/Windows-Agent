@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher (v1.7-18 - brain mode toggle + local cancel)
+rem  Windows Agent launcher (v1.7-19 - direct Drive control + brain mode)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================

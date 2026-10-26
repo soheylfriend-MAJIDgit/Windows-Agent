@@ -2861,6 +2861,18 @@ def start(api=None) -> None:
             _api_ref = api
         _stop_event.clear()
 
+    # Direct Drive control is a separate optional transport. It starts only after the
+    # owner explicitly provisions a DPAPI-protected OAuth token with authorize.py.
+    try:
+        import drive_control_transport
+        drive_control_transport.start(_api_ref)
+    except Exception as exc:
+        if _api_ref is not None:
+            try:
+                _api_ref.log(f"Drive Control transport not started ({type(exc).__name__}).")
+            except Exception:
+                pass
+
     cfg = _refresh_secret_cache(_api_ref)
     if cfg and _api_ref is not None:
         try:
@@ -2883,9 +2895,14 @@ def start(api=None) -> None:
 
 
 def stop() -> None:
-    """توقف نخ پس‌زمینه در زمان بسته شدن برنامه."""
+    """توقف نخ‌های پس‌زمینه در زمان بسته شدن برنامه."""
     _stop_event.set()
     _wake_event.set()
+    try:
+        import drive_control_transport
+        drive_control_transport.stop(_api_ref)
+    except Exception:
+        pass
 
 
 def wake() -> None:
