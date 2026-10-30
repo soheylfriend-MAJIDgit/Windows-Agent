@@ -1,1 +1,9 @@
+# رابط کاربری: پنجره‌ی WebView2 با HTML/CSS/JS
+pywebview>=5.0
+
+# گرفتن اسکرین‌شات
 Pillow>=9.0.0
+
+# OAuth مستقیم Google Drive برای کانال کنترل آنلاین (توکن فقط با DPAPI ذخیره می‌شود)
+google-auth-oauthlib>=1.2.2
+requests>=2.32.3
