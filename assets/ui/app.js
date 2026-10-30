@@ -28,6 +28,14 @@
 
   var CHANGELOG = [
     {
+      v: '۱.۷-۲۰', d: '۱۴۰۵/۰۸/۰۸',
+      items: [
+        'کنترل اضطراری توقف همه از Heartbeat مستقل، با Idempotency و گزارش نتیجه‌ی تأییدشده به مدیریت.',
+        'Registry و PIDهای متعلق پس از توقف دوباره بررسی می‌شوند؛ شکست توقف با شناسه‌ها و PIDهای باقی‌مانده گزارش می‌شود.',
+        'نسخه و Commit جاری از Git HEAD یا build stamp زمان اجرای run.bat خوانده می‌شوند.'
+      ]
+    },
+    {
       v: '۱.۷', d: '۱۴۰۵/۰۸/۰۲',
       items: [
         'تب تازه: «ربات تلگرام» با چهار زیرتب — تنظیمات، تست، صف پیام‌ها، راهنمای ایجنت همکار.',
@@ -290,7 +298,7 @@
     $('theme-btn').title = s.theme === 'light' ? 'رفتن به تم تاریک' : 'رفتن به تم روشن';
 
     renderMode(s);
-    renderExecutionCenter((s.manager && s.manager.executions) || []);
+    renderExecutionCenter((s.manager && s.manager.executions) || [], (s.manager && s.manager.emergency_control_status) || "");
     renderStats(s);
     renderPaths(s);
     renderCodes(s);
@@ -329,9 +337,15 @@
     return min ? fa(min + ' دقیقه ' + sec + ' ثانیه') : fa(sec + ' ثانیه');
   }
 
-  function renderExecutionCenter(rows) {
+  function renderExecutionCenter(rows, emergencyStatus) {
     var box = $('execution-groups');
     if (!box) return;
+    var controlStatus = $('execution-control-status');
+    if (controlStatus) {
+      controlStatus.textContent = emergencyStatus || '';
+      controlStatus.classList.toggle('visible', !!emergencyStatus);
+      controlStatus.dataset.state = /ناموفق|نشد|خطا/.test(emergencyStatus || '') ? 'error' : (/در حال/.test(emergencyStatus || '') || /دریافت شد/.test(emergencyStatus || '') ? 'active' : 'success');
+    }
     rows = Array.isArray(rows) ? rows : [];
     var activeStatuses = ['preparing', 'waiting_confirmation', 'running', 'monitoring'];
     var active = rows.filter(function (r) { return EXECUTION_TERMINAL.indexOf(r.status) < 0 && r.status !== 'stopping'; });

@@ -2,7 +2,7 @@
 
 ابزار اتوماسیون دسکتاپ ویندوز با رابط کاربری ساده.
 
-نسخه فعلی: **۱.۷-۱۵ — اعلام OCR آماده در Heartbeat پس از self-test آفلاین**
+نسخه فعلی: **۱.۷-۲۰ — کنترل اضطراری توقف همه با تأیید Registry و گزارش نتیجه به مدیریت**
 
 ---
 
@@ -76,6 +76,10 @@ Windows-Agent/
 ### کنترل مستقیم Google Drive برای ایجنت مدیریت
 
 برای کنارگذاشتن Drive Desktop mirror، راهنمای راه‌اندازی دستی OAuth، ذخیره DPAPI، کنترل `play/pause/stop`، حفاظت از replay و محدودیت‌های آزمون Windows را در [`docs/direct-drive-control.md`](docs/direct-drive-control.md) ببین. راه‌اندازی OAuth خودکار نیست؛ تا وقتی مالک آن را دستی انجام ندهد و حالت خودکار محلی و `CONTROL.txt=play` هر دو فعال نشوند، payload اجرا نمی‌شود.
+
+### توقف اضطراری همه از سایت مدیریت
+
+کلاینت Management قابلیت `emergency_stop_all` را در Heartbeat اعلام می‌کند. درخواست `stop_all_executions` جدا از صف Claim پردازش می‌شود؛ نتیجه فقط پس از بررسی وضعیت‌های Registry و PIDهای فرایندهای متعلق گزارش می‌شود. شناسه‌ی کنترل و نتیجه‌ی در انتظار ارسال، بدون Agent Key، در `%LOCALAPPDATA%\\Windows-Agent\\emergency_control_state.json` نگهداری می‌شوند. جزئیات و محدودیت آزمون Windows در [`docs/emergency-stop-control.md`](docs/emergency-stop-control.md) آمده است.
 
 ## شناسنامه نسخه و کامیت در هدر
 

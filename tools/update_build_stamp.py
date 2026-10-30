@@ -173,6 +173,11 @@ def main() -> int:
         print(f"Build {oid[:7]} | latest commit {jy:04d}/{jm:02d}/{jd:02d} {moment:%H:%M} Tehran")
         return 0
     except Exception as exc:
+        # Never leave a previous launch's commit stamp masquerading as this build.
+        try:
+            stamp.unlink(missing_ok=True)
+        except OSError:
+            pass
         print(f"WARNING: Could not read Git commit metadata; embedded fallback will be used ({exc})")
         return 1
 

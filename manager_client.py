@@ -52,6 +52,7 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_BASE_URL = "https://windows-agent-management-cloudflare.soheylfriend.workers.dev/api/agent"
 DEFAULT_AGENT_ID = "windows-agent-alibatel-main"
@@ -795,7 +796,9 @@ def _marker_matches(pid: int, marker: float | None) -> bool:
 
 class _RecoveredProcessHandle:
     def __init__(self, pid: int, marker: float | None): self.pid, self.marker = int(pid), marker
-    def poll(self): return None if _marker_matches(self.pid, self.marker) else 0
+    def poll(self):
+        # Without a persisted marker the PID is never treated as a live owned root.
+        return 0 if self.marker is None else (None if _marker_matches(self.pid, self.marker) else 0)
     def wait(self, timeout=None):
         end = time.monotonic() + (timeout or 0)
         while self.poll() is None and time.monotonic() < end: time.sleep(0.02)
@@ -807,7 +810,9 @@ class _RecoveredProcessHandle:
 def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, execution_id="", known_owned=None) -> dict:
     if proc is None: return {"ok": False, "remaining": [], "child_pids": [], "duration": 0.0}
     started = time.monotonic(); deadline = started + max(0.1, float(timeout_seconds)); root = int(proc.pid)
-    if expected_marker is None: expected_marker = _get_process_start_marker(root)
+    unverified_recovered_root = isinstance(proc, _RecoveredProcessHandle) and proc.marker is None
+    if expected_marker is None and not isinstance(proc, _RecoveredProcessHandle):
+        expected_marker = _get_process_start_marker(root)
     try: process_still_running = proc.poll() is None
     except Exception: process_still_running = False
     if expected_marker is None and process_still_running:
@@ -828,10 +833,12 @@ def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, executi
                 owned[pid] = {"pid": pid, "parent_pid": item.get("parent_pid"), "start_marker": marker}
         except Exception: pass
     if root_alive: owned[root] = {"pid": root, "parent_pid": os.getpid(), "start_marker": expected_marker}
-    if not owned: return {"ok": True, "remaining": [], "child_pids": [], "duration": time.monotonic()-started}
+    if not owned and not unverified_recovered_root:
+        return {"ok": True, "remaining": [], "child_pids": [], "duration": time.monotonic()-started}
     def discover():
-        if root_alive:
-            for item in _owned_descendants(root):
+        parents = [pid for pid, item in list(owned.items()) if _marker_matches(pid, item.get("start_marker"))]
+        for parent_pid in parents:
+            for item in _owned_descendants(parent_pid):
                 if item["start_marker"] is not None:
                     old = owned.get(item["pid"])
                     if old is None or old.get("start_marker") == item["start_marker"]: owned[item["pid"]] = item
@@ -875,6 +882,8 @@ def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, executi
                 except Exception: pass
         time.sleep(0.025)
     discover(); remaining=sorted(pid for pid,it in owned.items() if _marker_matches(pid,it.get("start_marker")))
+    if unverified_recovered_root:
+        remaining = sorted(set(remaining + [root]))
     try: proc.wait(timeout=max(0.01,min(0.1,deadline-time.monotonic())))
     except Exception: pass
     children=sorted(pid for pid in owned if pid != root); duration=time.monotonic()-started
@@ -1277,6 +1286,10 @@ def clear_local_cancel() -> None:
         _local_cancel_event.clear()
 
 
+def emergency_stop_in_progress() -> bool:
+    return _emergency_control_gate.is_set()
+
+
 def probe_network_health(base_url: str, agent_key: str, timeout: float = HTTP_TIMEOUT) -> bool:
     """بررسی سبک و سریع سلامت ارتباط با API ایجنت مدیریت با Timeout محدود."""
     if _network_probe_override is not None:
@@ -1308,6 +1321,9 @@ _worker_thread: threading.Thread | None = None
 _command_thread: threading.Thread | None = None
 _command_lock = threading.Lock()
 _claim_in_progress = False
+_emergency_lock = threading.RLock()
+_emergency_control_gate = threading.Event()
+_emergency_control_inflight: set[str] = set()
 _stop_event = threading.Event()
 _wake_event = threading.Event()
 _api_ref = None
@@ -1331,6 +1347,8 @@ _runtime_info: dict = {
     "last_error": "",
     "arena_vision_ocr_ready": False,
     "network_resilience_ready": False,
+    "emergency_control_status": "",
+    "emergency_control_id": "",
     "ocr_engine": "paddleocr",
     "ocr_local_only": True,
 }
@@ -1449,6 +1467,39 @@ def set_execution_process(execution_id: str, proc: subprocess.Popen, title: str,
                            status="running", stage="process_started", last_message="Process شروع شد.", **fields)
 
 
+def snapshot_execution_tree(execution_id: str, root_pid: int, root_marker: float | None) -> list[int]:
+    """Persist only marker-verified descendants of an execution's verified root."""
+    row = next((r for r in get_execution_registry() if r.get("execution_id") == execution_id), {})
+    owned_by_pid = {int(item["pid"]): dict(item) for item in (row.get("owned_processes") or [])
+                    if isinstance(item, dict) and item.get("pid")}
+    root_alive = root_marker is not None and _marker_matches(int(root_pid), root_marker)
+    if root_alive:
+        owned_by_pid[int(root_pid)] = {"pid": int(root_pid), "parent_pid": os.getpid(), "start_marker": root_marker}
+    known_parents = [pid for pid, item in owned_by_pid.items() if _marker_matches(pid, item.get("start_marker"))]
+    for parent_pid in known_parents:
+        for item in _owned_descendants(parent_pid):
+            try:
+                pid, marker = int(item["pid"]), item.get("start_marker")
+                if marker is not None:
+                    old = owned_by_pid.get(pid)
+                    if old is None or old.get("start_marker") == marker:
+                        owned_by_pid[pid] = item
+            except Exception:
+                continue
+    owned = [item for item in owned_by_pid.values()
+             if item.get("start_marker") is not None and _marker_matches(int(item["pid"]), item["start_marker"])]
+    children = sorted(int(item["pid"]) for item in owned if int(item["pid"]) != int(root_pid))
+    if row.get("status") == "stopping":
+        status, stage = "stopping", "termination_started"
+    else:
+        status = "running" if root_alive else ("monitoring" if children else row.get("status", "running"))
+        stage = "running" if root_alive else ("monitoring" if children else row.get("stage", "running"))
+    update_execution(execution_id, status=status, stage=stage, pid=int(root_pid),
+                     process_start_marker=root_marker, owned_processes=owned, child_pids=children,
+                     last_message="پایش فرزندان متعلق پس از پایان Process اصلی." if children and not root_alive else row.get("last_message", ""))
+    return children
+
+
 def bind_execution_cancel_event(execution_id: str, event: threading.Event) -> None:
     with _execution_lock:
         _command_cancel_events[execution_id] = event
@@ -1463,13 +1514,36 @@ def complete_execution(execution_id: str, status: str, message: str, exit_code=N
 
 
 def request_execution_stop(execution_id: str, reason: str = "توقف فوری از مرکز اجرای زنده") -> dict:
+    """Mark an execution as stopping and interrupt only its verified owned process tree."""
     _load_execution_registry()
     with _execution_lock:
         row = _execution_records.get(execution_id)
-        if not row or row.get("status") not in _EXECUTION_ACTIVE: return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
-        row.update(status="stopping", stage="termination_started", cancel_requested_at=utc_iso_now(),
+        if not row:
+            return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
+        live_pids = _execution_alive_pids(execution_id)
+        has_unverified_remainders = bool(row.get("remaining_pids"))
+        if row.get("status") not in _EXECUTION_ACTIVE and not live_pids and not has_unverified_remainders:
+            return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
+        row.update(status="stopping", stage="termination_started", cancel_requested_at=row.get("cancel_requested_at") or utc_iso_now(),
                    cancel_reason=str(reason)[:500], last_message="درخواست توقف ثبت شد.", updated_at=utc_iso_now())
-        ev = _command_cancel_events.get(execution_id); proc = _process_handles.get(execution_id); _persist_execution_registry()
+        ev = _command_cancel_events.get(execution_id)
+        proc = _process_handles.get(execution_id)
+        if proc is None and row.get("pid") and row.get("process_start_marker") is not None:
+            proc = _RecoveredProcessHandle(int(row["pid"]), row.get("process_start_marker"))
+            _process_handles[execution_id] = proc
+        elif proc is None and row.get("pid"):
+            pid = int(row["pid"])
+            verified_children = [child for child in live_pids if child != pid]
+            if verified_children:
+                # Descendants have their own persisted markers and can be safely stopped; the
+                # unverified root PID will remain an explicit failure in the final result.
+                proc = _RecoveredProcessHandle(pid, None)
+                _process_handles[execution_id] = proc
+            else:
+                msg = f"توقف امن ممکن نیست؛ start marker برای PID {pid} قابل تأیید نبود."
+                row.update(status="termination_failed", stage="termination_failed", remaining_pids=[pid],
+                           error_summary=msg, last_message=msg, updated_at=utc_iso_now())
+        _persist_execution_registry()
     if ev: ev.set()
     if proc:
         threading.Thread(target=_stop_execution_process, args=(execution_id, proc), daemon=True,
@@ -1483,16 +1557,381 @@ def _stop_execution_process(execution_id: str, proc: subprocess.Popen) -> None:
         update_execution(execution_id, status="cancelled", stage="termination_verified", last_message="اجرا و Processهای متعلق به آن متوقف شدند.")
 
 
-def request_stop_all_executions(reason: str = "توقف همه از مرکز اجرای زنده") -> dict:
-    rows = [r for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE]
-    ids = [str(r["execution_id"]) for r in rows]
-    if not ids: return {"ok": True, "count": 0}
-    def batch():
-        threads = [threading.Thread(target=request_execution_stop, args=(eid, reason), daemon=True) for eid in ids]
-        for t in threads: t.start()
-        for t in threads: t.join(timeout=2.5)
-    threading.Thread(target=batch, daemon=True, name="stop-all-executions").start()
-    return {"ok": True, "count": len(ids), "execution_ids": ids}
+def request_stop_all_executions(reason: str = "توقف همه از مرکز اجرای زنده", *, wait: bool = False,
+                                timeout_seconds: float = 12.0) -> dict:
+    """Request stop for all active/straggling owned trees; optionally wait for verified cleanup."""
+    all_rows = get_execution_registry()
+    target_rows = []
+    for row in all_rows:
+        execution_id = str(row.get("execution_id") or "")
+        if not execution_id:
+            continue
+        if row.get("status") in _EXECUTION_ACTIVE or _execution_alive_pids(execution_id) or row.get("remaining_pids"):
+            target_rows.append(row)
+    ids = [str(r["execution_id"]) for r in target_rows]
+    if not wait:
+        if not ids:
+            return {"ok": True, "count": 0, "execution_ids": []}
+        def batch():
+            threads = [threading.Thread(target=request_execution_stop, args=(eid, reason), daemon=True) for eid in ids]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(timeout=2.5)
+        threading.Thread(target=batch, daemon=True, name="stop-all-executions").start()
+        return {"ok": True, "count": len(ids), "execution_ids": ids}
+
+    started = time.monotonic()
+    deadline = started + max(1.0, min(30.0, float(timeout_seconds)))
+    requested_ids = set(ids)
+    stop_threads = []
+    def start_stop_request(execution_id: str) -> None:
+        thread = threading.Thread(target=request_execution_stop, args=(execution_id, reason), daemon=True,
+                                  name=f"stop-all-{execution_id[:16]}")
+        stop_threads.append((execution_id, thread))
+        thread.start()
+    for execution_id in ids: start_stop_request(execution_id)
+    while time.monotonic() < deadline:
+        rows = get_execution_registry()
+        active_rows = [r for r in rows if r.get("status") in _EXECUTION_ACTIVE]
+        alive_by_id = {str(r.get("execution_id")): _execution_alive_pids(str(r.get("execution_id"))) for r in rows}
+        for row in rows:
+            execution_id = str(row.get("execution_id") or "")
+            if execution_id and execution_id not in requested_ids and (row.get("status") in _EXECUTION_ACTIVE or alive_by_id.get(execution_id) or row.get("remaining_pids")):
+                requested_ids.add(execution_id)
+                ids.append(execution_id)
+                start_stop_request(execution_id)
+        remaining = set()
+        for row in rows:
+            owned = {int(x.get("pid")): x.get("start_marker") for x in (row.get("owned_processes") or [])
+                     if isinstance(x, dict) and x.get("pid")}
+            for pid in row.get("remaining_pids") or []:
+                try:
+                    pid = int(pid); marker = owned.get(pid)
+                    if marker is None or _marker_matches(pid, marker): remaining.add(pid)
+                except Exception:
+                    continue
+            live_pids = alive_by_id.get(str(row.get("execution_id")), [])
+            remaining.update(live_pids)
+            if row.get("status") in _EXECUTION_ACTIVE:
+                for item in row.get("owned_processes") or []:
+                    if isinstance(item, dict) and item.get("pid") and item.get("start_marker") is None:
+                        try: remaining.add(int(item["pid"]))
+                        except Exception: pass
+        with _command_lock:
+            claim_pending = bool(_claim_in_progress)
+        with _lock:
+            command_pending = bool(_active_command_id)
+        threads_pending = any(thread.is_alive() for _, thread in stop_threads)
+        if not active_rows and not remaining and not claim_pending and not command_pending and not threads_pending:
+            break
+        time.sleep(0.1)
+
+    rows = get_execution_registry()
+    active_rows = [r for r in rows if r.get("status") in _EXECUTION_ACTIVE]
+    active_ids = sorted({str(r.get("execution_id")) for r in active_rows})
+    remaining = set()
+    remaining_execution_ids = set()
+    live_by_id = {}
+    for row in rows:
+        execution_id = str(row.get("execution_id") or "")
+        live = _execution_alive_pids(execution_id) if execution_id else []
+        live_by_id[execution_id] = live
+        owned = {int(x.get("pid")): x.get("start_marker") for x in (row.get("owned_processes") or [])
+                 if isinstance(x, dict) and x.get("pid")}
+        for pid in row.get("remaining_pids") or []:
+            try:
+                pid = int(pid); marker = owned.get(pid)
+                if marker is None or _marker_matches(pid, marker):
+                    remaining.add(pid)
+                    remaining_execution_ids.add(execution_id)
+            except Exception:
+                continue
+        remaining.update(live)
+        uncertain_pids = []
+        if row.get("status") in _EXECUTION_ACTIVE or row.get("status") == "termination_failed":
+            for item in row.get("owned_processes") or []:
+                if isinstance(item, dict) and item.get("pid") and item.get("start_marker") is None:
+                    try: uncertain_pids.append(int(item["pid"]))
+                    except Exception: pass
+        if uncertain_pids:
+            remaining.update(uncertain_pids)
+            remaining_execution_ids.add(execution_id)
+        if live and execution_id:
+            remaining_execution_ids.add(execution_id)
+            if execution_id not in active_ids:
+                active_ids.append(execution_id)
+        if execution_id in remaining_execution_ids and execution_id not in active_ids:
+            active_ids.append(execution_id)
+    with _command_lock:
+        claim_pending = bool(_claim_in_progress)
+    with _lock:
+        active_command_id = _active_command_id
+    pending_stop_ids = {execution_id for execution_id, thread in stop_threads if thread.is_alive()}
+    for execution_id in pending_stop_ids:
+        if execution_id not in active_ids: active_ids.append(execution_id)
+    if active_command_id and active_command_id not in active_ids:
+        active_ids.append(active_command_id)
+    if claim_pending and not active_ids:
+        active_ids.append("command_claim_in_progress")
+    active_ids = sorted(set(active_ids))
+    verified = not active_rows and not remaining and not claim_pending and not active_command_id and not pending_stop_ids
+    initial_ids = set(ids)
+    stopped = sum(1 for execution_id in initial_ids
+                  if not any(r.get("execution_id") == execution_id and r.get("status") in _EXECUTION_ACTIVE for r in rows)
+                  and not live_by_id.get(execution_id) and execution_id not in remaining_execution_ids)
+    failed = max(0, len(initial_ids) - stopped) + len(set(active_ids) - initial_ids) + len(pending_stop_ids)
+    residual = sorted(remaining) or active_ids
+    message = ("Registry بررسی شد؛ اجرای فعالی وجود ندارد." if verified and not initial_ids else
+               "همه اجراهای متعلق متوقف شدند." if verified else
+               f"توقف کامل انجام نشد؛ اجرای فعال یا PID باقی است: {residual}")
+    return {"ok": verified, "verified": verified, "count": len(ids), "requested": len(ids), "stopped": stopped,
+            "failed": failed, "registryActiveCount": len(active_rows), "activeExecutionIds": active_ids,
+            "remainingPids": sorted(remaining), "execution_ids": ids, "message": message,
+            "durationSeconds": round(time.monotonic() - started, 3)}
+
+
+EMERGENCY_CONTROL_STATE_FILE_NAME = "emergency_control_state.json"
+EMERGENCY_CONTROL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _emergency_state_path() -> Path:
+    return STATE_DIR / EMERGENCY_CONTROL_STATE_FILE_NAME
+
+
+def _read_emergency_state() -> dict:
+    try:
+        value = json.loads(_emergency_state_path().read_text(encoding="utf-8"))
+        if isinstance(value, dict) and isinstance(value.get("controls"), dict):
+            return value
+    except Exception:
+        pass
+    return {"schema": 1, "controls": {}}
+
+
+def _write_emergency_state(state: dict) -> None:
+    try:
+        path = _emergency_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        controls = state.get("controls") if isinstance(state.get("controls"), dict) else {}
+        recent = sorted(controls.items(), key=lambda item: str(item[1].get("updated_at") or ""), reverse=True)[:200]
+        state["controls"] = dict(recent)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _safe_control_fields(control: dict) -> dict:
+    return {
+        "id": str(control.get("id") or "").strip(),
+        "action": str(control.get("action") or "").strip(),
+        "reason": redact_sensitive(str(control.get("reason") or "توقف فوری همه اجراها از سایت مدیریت"), 500),
+        "requestedAt": str(control.get("requestedAt") or "")[:80],
+        "resultEndpoint": str(control.get("resultEndpoint") or "")[:500],
+    }
+
+
+def _set_emergency_status(api, control_id: str, message: str) -> None:
+    with _lock:
+        _runtime_info["emergency_control_id"] = control_id
+        _runtime_info["emergency_control_status"] = message[:240]
+    if api is not None:
+        try:
+            setter = getattr(api, "set_emergency_control_status", None)
+            if callable(setter): setter(message[:240])
+            else: api.log(message[:240])
+        except Exception:
+            pass
+
+
+def _emergency_result_url(base_url: str, control: dict) -> str | None:
+    """Accept only the authenticated Agent API's exact result route for this control ID."""
+    control_id = str(control.get("id") or "")
+    endpoint = str(control.get("resultEndpoint") or "")
+    if not EMERGENCY_CONTROL_ID_RE.fullmatch(control_id) or not endpoint.startswith("/"):
+        return None
+    try:
+        base = urlsplit(base_url)
+        parsed = urlsplit(endpoint)
+        base_path = base.path.rstrip("/")
+        expected_path = f"{base_path}/controls/{control_id}"
+        if (not base.scheme or not base.netloc or parsed.scheme or parsed.netloc or parsed.query or parsed.fragment
+                or parsed.path != expected_path):
+            return None
+        return urlunsplit((base.scheme, base.netloc, parsed.path, "", ""))
+    except Exception:
+        return None
+
+
+def _post_emergency_result(api, cfg: dict, control_id: str) -> bool:
+    with _emergency_lock:
+        state = _read_emergency_state()
+        record = state["controls"].get(control_id)
+        if not isinstance(record, dict) or record.get("status") != "result_pending":
+            return False
+        control = record.get("control") if isinstance(record.get("control"), dict) else {}
+        result_payload = record.get("result") if isinstance(record.get("result"), dict) else {}
+        endpoint_url = _emergency_result_url(cfg.get("base_url", ""), control)
+        record["attempts"] = int(record.get("attempts") or 0) + 1
+        record["last_attempt_at"] = time.time()
+        record["updated_at"] = utc_iso_now()
+        _write_emergency_state(state)
+    if not endpoint_url:
+        _set_emergency_status(api, control_id, "نتیجه توقف به مدیریت ارسال نشد؛ resultEndpoint نامعتبر است.")
+        return False
+    ok, code, response = _http_json("POST", endpoint_url, cfg["agent_key"], result_payload, timeout=HTTP_TIMEOUT)
+    error_obj = response.get("error") if isinstance(response, dict) else None
+    error_code = str(error_obj.get("code") or "") if isinstance(error_obj, dict) else str(error_obj or "")
+    already_accepted = code == 409 and (bool(response.get("alreadyCompleted") or response.get("completed"))
+                                       or error_code in {"control_already_completed", "already_completed", "duplicate_result"})
+    if ok or already_accepted:
+        with _emergency_lock:
+            state = _read_emergency_state()
+            record = state["controls"].get(control_id)
+            if isinstance(record, dict):
+                record.update(status="completed", response_status=code, completed_at=utc_iso_now(), updated_at=utc_iso_now())
+                _write_emergency_state(state)
+        _emergency_control_gate.clear()
+        _set_emergency_status(api, control_id, str((result_payload.get("result") or {}).get("message") or "نتیجه توقف به مدیریت ارسال شد."))
+        return True
+    _set_emergency_status(api, control_id, f"نتیجه توقف ارسال نشد (HTTP {code or 'شبکه'}); ارسال مجدد انجام می‌شود.")
+    return False
+
+
+def _emergency_control_worker(api, cfg: dict, control_id: str, resume_only: bool = False) -> None:
+    try:
+        with _emergency_lock:
+            state = _read_emergency_state()
+            record = state["controls"].get(control_id) or {}
+            control = record.get("control") if isinstance(record.get("control"), dict) else {}
+            has_result = record.get("status") == "result_pending" and isinstance(record.get("result"), dict)
+        if has_result or resume_only:
+            _post_emergency_result(api, cfg, control_id)
+            return
+
+        if control.get("action") != "stop_all_executions":
+            payload = {"status": "failed", "result": {"verified": False, "requested": 0, "stopped": 0,
+                       "failed": 1, "registryActiveCount": len([r for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE]),
+                       "activeExecutionIds": [str(r.get("execution_id")) for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE],
+                       "remainingPids": [], "message": "عملیات اضطراری پشتیبانی نمی‌شود؛ توقفی گزارش نشده است."}}
+            with _emergency_lock:
+                state = _read_emergency_state(); record = state["controls"].get(control_id)
+                if isinstance(record, dict): record.update(status="result_pending", result=payload, updated_at=utc_iso_now()); _write_emergency_state(state)
+            _post_emergency_result(api, cfg, control_id)
+            return
+
+        reason = str(control.get("reason") or "توقف فوری همه اجراها از سایت مدیریت")
+        _set_emergency_status(api, control_id, "درخواست توقف همه از سایت مدیریت دریافت شد")
+        request_local_cancel(reason)
+        if api is not None:
+            try:
+                prepare = getattr(api, "prepare_emergency_stop_all", None)
+                if callable(prepare): prepare(reason, control_id)
+            except Exception:
+                pass
+        _set_emergency_status(api, control_id, "در حال توقف Processهای متعلق…")
+        stop_result = request_stop_all_executions(reason, wait=True, timeout_seconds=15.0)
+        verified = bool(stop_result.get("verified"))
+        result = {
+            "verified": verified,
+            "requested": int(stop_result.get("requested", stop_result.get("count", 0))),
+            "stopped": int(stop_result.get("stopped", 0)),
+            "failed": int(stop_result.get("failed", 0)),
+            "registryActiveCount": int(stop_result.get("registryActiveCount", 0)),
+            "activeExecutionIds": list(stop_result.get("activeExecutionIds") or []),
+            "remainingPids": sorted({int(pid) for pid in (stop_result.get("remainingPids") or []) if str(pid).isdigit()}),
+            "message": str(stop_result.get("message") or ("همه اجراهای متعلق متوقف شدند." if verified else "توقف کامل نشد؛ بررسی دستی لازم است."))[:500],
+        }
+        payload = {"status": "succeeded" if verified else "failed", "result": result}
+        with _emergency_lock:
+            state = _read_emergency_state()
+            record = state["controls"].get(control_id)
+            if isinstance(record, dict):
+                record.update(status="result_pending", result=payload, updated_at=utc_iso_now())
+                _write_emergency_state(state)
+        _set_emergency_status(api, control_id, result["message"] if verified else "توقف کامل نشد؛ بررسی دستی لازم است")
+        _post_emergency_result(api, cfg, control_id)
+    except Exception as exc:
+        try:
+            rows = get_execution_registry()
+            active_rows = [r for r in rows if r.get("status") in _EXECUTION_ACTIVE]
+            remaining = set()
+            for row in rows:
+                remaining.update(_execution_alive_pids(str(row.get("execution_id") or "")))
+                remaining.update(int(pid) for pid in (row.get("remaining_pids") or []) if str(pid).isdigit())
+            payload = {"status": "failed", "result": {"verified": False,
+                       "requested": len(active_rows), "stopped": 0, "failed": max(1, len(active_rows)),
+                       "registryActiveCount": len(active_rows),
+                       "activeExecutionIds": [str(r.get("execution_id")) for r in active_rows],
+                       "remainingPids": sorted(remaining),
+                       "message": f"توقف اضطراری کامل راستی‌آزمایی نشد ({type(exc).__name__})؛ بررسی دستی لازم است."}}
+            with _emergency_lock:
+                state = _read_emergency_state(); record = state["controls"].get(control_id)
+                if isinstance(record, dict): record.update(status="result_pending", result=payload, updated_at=utc_iso_now()); _write_emergency_state(state)
+            _set_emergency_status(api, control_id, payload["result"]["message"])
+            _post_emergency_result(api, cfg, control_id)
+        except Exception:
+            _set_emergency_status(api, control_id, f"خطا در کنترل توقف اضطراری: {type(exc).__name__}")
+    finally:
+        with _emergency_lock:
+            _emergency_control_inflight.discard(control_id)
+
+
+def _queue_emergency_control(api, cfg: dict, raw_control: dict) -> bool:
+    control = _safe_control_fields(raw_control)
+    control_id = control["id"]
+    if not EMERGENCY_CONTROL_ID_RE.fullmatch(control_id):
+        if api is not None:
+            try: api.log("کنترل اضطراری نادیده گرفته شد: Control ID نامعتبر است.")
+            except Exception: pass
+        return False
+    with _emergency_lock:
+        state = _read_emergency_state()
+        records = state["controls"]
+        record = records.get(control_id)
+        if isinstance(record, dict) and record.get("status") == "completed":
+            return False
+        if control_id in _emergency_control_inflight:
+            return False
+        if (isinstance(record, dict) and record.get("status") == "result_pending"
+                and time.time() - float(record.get("last_attempt_at") or 0) < 5.0):
+            return False
+        if not isinstance(record, dict):
+            record = {"control": control, "status": "processing", "created_at": utc_iso_now(), "attempts": 0}
+            records[control_id] = record
+        elif record.get("status") == "result_pending":
+            # Reuse the saved result; never repeat a completed stop operation just to retry its POST.
+            pass
+        else:
+            record["control"] = control
+            record["status"] = "processing"
+            record["updated_at"] = utc_iso_now()
+        state["controls"] = records
+        _write_emergency_state(state)
+        _emergency_control_inflight.add(control_id)
+        _emergency_control_gate.set()
+        resume_only = record.get("status") == "result_pending"
+    thread = threading.Thread(target=_emergency_control_worker, args=(api, dict(cfg), control_id, resume_only),
+                              daemon=True, name=f"emergency-stop-{control_id[:24]}")
+    thread.start()
+    return True
+
+
+def _resume_pending_emergency_controls(api, cfg: dict) -> None:
+    now = time.time()
+    with _emergency_lock:
+        state = _read_emergency_state()
+        pending = [(key, dict(record)) for key, record in state["controls"].items()
+                   if isinstance(record, dict) and record.get("status") in {"processing", "result_pending"}]
+    for control_id, record in pending:
+        last_attempt = float(record.get("last_attempt_at") or 0)
+        if record.get("status") == "result_pending" and now - last_attempt < 5.0:
+            _emergency_control_gate.set()
+            continue
+        control = record.get("control") if isinstance(record.get("control"), dict) else {}
+        if control_id in _emergency_control_inflight:
+            continue
+        _queue_emergency_control(api, cfg, control)
 
 
 def set_confirm_handler(handler) -> None:
@@ -1737,6 +2176,7 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
             "telegram_queue": True,
             "command_plane": True,
             "d1_automations": True,
+            "emergency_stop_all": True,
             # OCR تا پس از نصب/گرم‌سازی و self-test آفلاین واقعی true نمی‌شود.
             "arena_vision_ocr": vision_ready,
             "network_resilience": network_ready,
@@ -1806,6 +2246,11 @@ def send_heartbeat_once(api, cfg: dict | None = None) -> tuple[bool, int, dict]:
             _runtime_info["last_heartbeat_at"] = stamp
             _runtime_info["last_error"] = ""
         _set_manager_status(api, True, "وصل", "")
+        control = data.get("emergencyControl") if isinstance(data, dict) else None
+        if not isinstance(control, dict) and isinstance(data, dict) and isinstance(data.get("data"), dict):
+            control = data["data"].get("emergencyControl")
+        if isinstance(control, dict):
+            _queue_emergency_control(api, cfg, control)
         return True, code, data
 
     if code == 401:
@@ -1888,9 +2333,13 @@ def poll_connection_test_once(api, cfg: dict | None = None) -> tuple[bool, int, 
 # ------------------------------------ API صف فرمان و پایش زنده (Command Plane) ---
 
 def _save_active_command_marker(cmd_id: str, pid: int | None, start_marker: float | None, job_name: str, seq: int,
-                                stage: str = "running", workspace_path: str = "", cancel_requested: bool = False) -> None:
+                                stage: str = "running", workspace_path: str = "", cancel_requested: bool = False,
+                                owned_processes: list[dict] | None = None) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if owned_processes is None:
+            row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+            owned_processes = row.get("owned_processes") or []
         payload = {
             "command_id": cmd_id,
             "pid": pid,
@@ -1899,6 +2348,7 @@ def _save_active_command_marker(cmd_id: str, pid: int | None, start_marker: floa
             "seq": seq,
             "stage": stage,
             "workspace_path": workspace_path,
+            "owned_processes": owned_processes,
             "cancel_requested": bool(cancel_requested),
             "saved_at": utc_iso_now(),
         }
@@ -1939,7 +2389,15 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         _clear_active_command_marker()
         return
 
-    if pid > 0 and marker is not None and _marker_matches(pid, marker):
+    old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+    owned_records = []
+    for item in (old_row.get("owned_processes") or []) + (info.get("owned_processes") or []):
+        if isinstance(item, dict) and item.get("pid") and item.get("start_marker") is not None:
+            if not any(int(old.get("pid", -1)) == int(item["pid"]) and old.get("start_marker") == item.get("start_marker") for old in owned_records):
+                owned_records.append(dict(item))
+    root_alive = pid > 0 and marker is not None and _marker_matches(pid, marker)
+    owned_alive = [item for item in owned_records if _marker_matches(int(item["pid"]), item.get("start_marker"))]
+    if pid > 0 and (root_alive or owned_alive):
         recovered = _RecoveredProcessHandle(pid, marker)
         with _lock:
             global _active_command_id
@@ -1950,12 +2408,14 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         try:
             api.busy = f"بازیابی اجرای باقی‌مانده ({cmd_id})"
         except Exception: pass
-        old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+        if root_alive and not any(int(item["pid"]) == pid for item in owned_records):
+            owned_records.append({"pid": pid, "parent_pid": old_row.get("parent_pid"), "start_marker": marker})
         register_execution(cmd_id, old_row.get("title") or info.get("job_name") or "اجرای بازیابی‌شده",
                            old_row.get("source") or "فرمان مدیریتی", old_row.get("execution_mode") or "foreground",
                            command_id=cmd_id, status="running", stage="recovery_required", pid=pid,
                            parent_pid=old_row.get("parent_pid"), process_start_marker=marker,
-                           owned_processes=old_row.get("owned_processes") or [{"pid": pid, "parent_pid": old_row.get("parent_pid"), "start_marker": marker}],
+                           owned_processes=owned_records,
+                           child_pids=[int(item["pid"]) for item in owned_records if int(item["pid"]) != pid],
                            workspace_path=info.get("workspace_path", ""), last_message="بازیابی اجرای باقی‌مانده پس از Restart")
         with _execution_lock: _process_handles[cmd_id] = recovered
         if info.get("cancel_requested") or old_row.get("cancel_requested_at"):
@@ -1966,22 +2426,26 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
 
     base_url = cfg["base_url"]
     agent_key = cfg["agent_key"]
-    previous = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+    previous = old_row
     was_cancelled = bool(info.get("cancel_requested") or previous.get("cancel_requested_at"))
-    final_status = "cancelled" if was_cancelled else "failed"
-    msg = ("فرمان در مرحله آماده‌سازی/توقف پیش از اجرای Process و پس از Restart reconcile شد."
-           if was_cancelled else "فرآیند اجرای فرمان پس از راه‌اندازی مجدد Windows Agent زنده نبود؛ نتیجه اجرا نامعلوم است.")
+    unverified_pid = bool(pid > 0 and marker is None)
+    final_status = "termination_failed" if unverified_pid else ("cancelled" if was_cancelled else "failed")
+    msg = (f"توقف پس از Restart قابل تأیید نیست؛ start marker برای PID {pid} موجود نیست."
+           if unverified_pid else ("فرمان پیش از شروع Process یا پس از توقف تأییدشده reconcile شد."
+           if was_cancelled else "فرآیند اجرای فرمان پس از راه‌اندازی مجدد Windows Agent زنده نبود؛ نتیجه اجرا نامعلوم است."))
+    remaining_after_restart = [pid] if unverified_pid else []
+    final_stage = "termination_failed" if unverified_pid else ("cancelled" if was_cancelled else "crash_recovery")
     _http_json(
         "POST",
         f"{base_url}/commands/{cmd_id}/events",
         agent_key,
         {
             "seq": seq,
-            "stage": "cancelled" if was_cancelled else "crash_recovery",
-            "level": "warning" if was_cancelled else "fatal",
+            "stage": final_stage,
+            "level": "fatal" if unverified_pid or not was_cancelled else "warning",
             "message": msg,
             "occurredAt": utc_iso_now(),
-            "data": {"commandId": cmd_id, "pid": pid or None, "reason": msg, "remainingPids": [], "autoStop": True},
+            "data": {"commandId": cmd_id, "pid": pid or None, "reason": msg, "remainingPids": remaining_after_restart, "autoStop": True},
         },
         timeout=HTTP_TIMEOUT,
     )
@@ -1990,18 +2454,20 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         f"{base_url}/commands/{cmd_id}",
         agent_key,
         {
-            "status": final_status,
+            "status": "failed" if final_status == "termination_failed" else final_status,
             "seq": seq + 1,
-            "stage": "cancelled" if was_cancelled else "crash_recovery",
+            "stage": final_stage,
             "message": msg,
-            "error": None if was_cancelled else msg,
-            "result": {"recoveredAfterRestart": True, "pid": pid or None, "terminationVerified": True, "remainingPids": []},
+            "error": None if final_status == "cancelled" else msg,
+            "result": {"recoveredAfterRestart": True, "pid": pid or None,
+                       "terminationVerified": not unverified_pid, "remainingPids": remaining_after_restart},
         },
         timeout=HTTP_TIMEOUT,
     )
     _clear_active_command_marker()
-    update_execution(cmd_id, status=final_status, stage="cancelled" if was_cancelled else "crash_recovery",
-                     last_message=msg, remaining_pids=[])
+    update_execution(cmd_id, status=final_status, stage=final_stage,
+                     last_message=msg, remaining_pids=remaining_after_restart,
+                     error_summary=msg if unverified_pid else "")
     workspace = Path(str(info.get("workspace_path") or ""))
     try:
         workspace_resolved = workspace.resolve()
@@ -2020,13 +2486,11 @@ def _monitor_recovered_command(api, cfg: dict, marker_info: dict, proc: _Recover
     requested_at = time.monotonic() if cancel_requested else None
     stop_failure_reported = False
     while True:
-        root_alive = _marker_matches(proc.pid, proc.marker)
         row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
         owned = list(row.get("owned_processes") or [])
-        if root_alive:
-            owned = [{"pid": proc.pid, "parent_pid": row.get("parent_pid"), "start_marker": proc.marker}] + [
-                x for x in _owned_descendants(proc.pid) if x.get("start_marker") is not None]
-            update_execution(cmd_id, owned_processes=owned, child_pids=[int(x["pid"]) for x in owned if int(x["pid"]) != proc.pid])
+        snapshot_execution_tree(cmd_id, proc.pid, proc.marker)
+        row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), row)
+        owned = list(row.get("owned_processes") or [])
         alive = [x for x in owned if x.get("start_marker") is not None and _marker_matches(int(x["pid"]), x.get("start_marker"))]
         if not cancel_requested and time.monotonic() >= getattr(_monitor_recovered_command, "next_poll", 0.0):
             _monitor_recovered_command.next_poll = time.monotonic() + 1.0
@@ -2043,20 +2507,27 @@ def _monitor_recovered_command(api, cfg: dict, marker_info: dict, proc: _Recover
         if cancel_requested and alive:
             _terminate_execution_tree(cmd_id, proc, 1.5)
         if not alive:
-            final_status = "cancelled" if cancel_requested else "failed"
-            message = ("Processهای اجرای باقی‌مانده پس از Restart متوقف و تأیید شدند." if cancel_requested else
-                       "فرآیند پس از Restart دیگر فعال نبود؛ نتیجه اجرای کامل نامعلوم است و فرمان به‌عنوان ناموفق reconcile شد.")
+            unverified_root = proc.marker is None
+            final_status = "termination_failed" if unverified_root else ("cancelled" if cancel_requested else "failed")
+            message = (f"توقف پس از Restart قابل تأیید نیست؛ start marker برای PID {proc.pid} موجود نیست."
+                       if unverified_root else ("Processهای اجرای باقی‌مانده پس از Restart متوقف و تأیید شدند." if cancel_requested else
+                       "فرآیند پس از Restart دیگر فعال نبود؛ نتیجه اجرای کامل نامعلوم است و فرمان به‌عنوان ناموفق reconcile شد."))
+            final_stage = "termination_failed" if unverified_root else ("cancelled" if cancel_requested else "crash_recovery")
+            remaining_recovered = [proc.pid] if unverified_root else []
             _http_json("POST", f"{base}/commands/{cmd_id}/events", key,
-                       {"seq": seq, "stage": "termination_verified" if cancel_requested else "crash_recovery",
-                        "level": "warning" if cancel_requested else "fatal", "message": message,
+                       {"seq": seq, "stage": final_stage,
+                        "level": "fatal" if unverified_root or not cancel_requested else "warning", "message": message,
                         "occurredAt": utc_iso_now(), "data": {"commandId": cmd_id, "pid": proc.pid,
                         "childPids": [int(x["pid"]) for x in owned if int(x["pid"]) != proc.pid],
-                        "reason": cancel_reason if cancel_requested else message, "remainingPids": [], "recoveredAfterRestart": True}}, timeout=HTTP_TIMEOUT)
+                        "reason": cancel_reason if cancel_requested else message, "remainingPids": remaining_recovered, "recoveredAfterRestart": True}}, timeout=HTTP_TIMEOUT)
             _http_json("POST", f"{base}/commands/{cmd_id}", key,
-                       {"status": final_status, "seq": seq + 1, "stage": "cancelled" if cancel_requested else "crash_recovery",
-                        "message": message, "error": None if cancel_requested else message,
-                        "result": {"recoveredAfterRestart": True, "pid": proc.pid, "terminationVerified": True}}, timeout=HTTP_TIMEOUT)
-            update_execution(cmd_id, status=final_status, stage=final_status, last_message=message, remaining_pids=[])
+                       {"status": "failed" if final_status == "termination_failed" else final_status,
+                        "seq": seq + 1, "stage": final_stage,
+                        "message": message, "error": None if final_status == "cancelled" else message,
+                        "result": {"recoveredAfterRestart": True, "pid": proc.pid,
+                                   "terminationVerified": not unverified_root, "remainingPids": remaining_recovered}}, timeout=HTTP_TIMEOUT)
+            update_execution(cmd_id, status=final_status, stage=final_stage, last_message=message,
+                             remaining_pids=remaining_recovered, error_summary=message if unverified_root else "")
             _clear_active_command_marker()
             with _execution_lock: _process_handles.pop(cmd_id, None)
             with _lock:
@@ -2959,7 +3430,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                          owned_processes=[{"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}],
                          last_message=f"Process شروع شد؛ PID {pid}")
         _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq, stage="running",
-                                    workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested)
+                                    workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested,
+                                    owned_processes=[{"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}])
 
         if not session.checkpoint("process_started"):
             stop_result = _terminate_execution_tree(cmd_id, proc, 2.0)
@@ -3055,17 +3527,13 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             idle_secs = now_mono - session.last_progress_mono
             if now_mono - last_tree_snapshot >= 0.5:
                 last_tree_snapshot = now_mono
-                old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
-                owned_by_pid = {int(item["pid"]): item for item in (old_row.get("owned_processes") or []) if isinstance(item, dict) and item.get("pid")}
-                if _marker_matches(pid, start_marker):
-                    owned_by_pid[pid] = {"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}
-                    owned_by_pid.update({int(item["pid"]): item for item in _owned_descendants(pid) if item.get("start_marker") is not None})
-                owned = [item for item in owned_by_pid.values() if item.get("start_marker") is not None and _marker_matches(int(item["pid"]), item.get("start_marker"))]
-                children = [int(item["pid"]) for item in owned if int(item["pid"]) != pid]
-                update_execution(cmd_id, child_pids=children, owned_processes=owned, stage="running",
-                                 pid=pid, parent_pid=os.getpid(), process_start_marker=start_marker)
-                _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq, stage="running",
-                                            workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested)
+                snapshot_execution_tree(cmd_id, pid, start_marker)
+                row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+                _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq,
+                                            stage=str(row.get("stage") or "running"),
+                                            workspace_path=str(cmd_workspace or run_cwd),
+                                            cancel_requested=session.cancel_requested,
+                                            owned_processes=row.get("owned_processes") or [])
 
             # پایش سبک مستقل Manager؛ job_arena.py خودش URL Arena را جداگانه می‌سنجد.
             if now_mono - session.last_network_probe >= 5.0:
@@ -3318,6 +3786,8 @@ def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
     cfg = cfg or _refresh_secret_cache(api)
     if not cfg:
         return False, "no_secret"
+    if _emergency_control_gate.is_set():
+        return True, "emergency_stop_in_progress"
 
     if not probe_network_health(cfg["base_url"], cfg["agent_key"], timeout=2.0):
         return False, "network_error"
@@ -3328,8 +3798,11 @@ def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
         if _active_command_id is not None:
             return True, "busy"
 
-    # Reset a previous request before claiming; do not clear again after active_command_id is exposed to UI.
-    clear_local_cancel()
+    # Serialize cancellation reset against emergency-control activation.
+    with _emergency_lock:
+        if _emergency_control_gate.is_set():
+            return True, "emergency_stop_in_progress"
+        clear_local_cancel()
     ok, code, data = _http_json(
         "POST",
         f"{cfg['base_url']}/commands/claim",
@@ -3369,6 +3842,8 @@ def _claim_worker(api, cfg: dict) -> None:
 
 def _start_claim_worker(api, cfg: dict) -> bool:
     global _command_thread, _claim_in_progress
+    with _emergency_lock:
+        if _emergency_control_gate.is_set(): return False
     with _command_lock:
         if _claim_in_progress or (_command_thread is not None and _command_thread.is_alive()): return False
         with _lock:
@@ -3389,6 +3864,7 @@ def _worker_loop() -> None:
     backoff_idx = 0
     auth_blocked = False
     recovered_once = False
+    last_emergency_resume = 0.0
 
     while not _stop_event.is_set():
         api = _api_ref
@@ -3408,6 +3884,13 @@ def _worker_loop() -> None:
             recovered_once = True
             try:
                 recover_stale_command_if_any(api, cfg)
+            except Exception:
+                pass
+
+        if time.monotonic() - last_emergency_resume >= 5.0:
+            last_emergency_resume = time.monotonic()
+            try:
+                _resume_pending_emergency_controls(api, cfg)
             except Exception:
                 pass
 

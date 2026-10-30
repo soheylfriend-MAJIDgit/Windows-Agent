@@ -62,8 +62,8 @@ POST /heartbeat
   "agentId": "windows-agent-alibatel-main",
   "name": "ایجنت ویندوز اصلی",
   "platform": "windows",
-  "version": "1.7-3",
-  "commit": "9151019",
+  "version": "1.7-20",
+  "commit": "شناسه‌ی واقعی Git HEAD در زمان اجرا",
   "status": "online",
   "capabilities": {
     "check_collab": true,
@@ -71,7 +71,10 @@ POST /heartbeat
     "run_single": true,
     "take_screenshot": true,
     "open_report": true,
-    "telegram_queue": true
+    "telegram_queue": true,
+    "command_plane": true,
+    "d1_automations": true,
+    "emergency_stop_all": true
   },
   "state": {
     "auto_mode": false,

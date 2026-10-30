@@ -1014,3 +1014,8 @@ body.busy #btn-run-new { opacity: .6; }
   .execution-counters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .execution-row-meta,.execution-row-message { font-size: 9px; }
 }
+.execution-control-status { display: none; margin: 0; padding: 0; border-radius: 8px; font-size: 10.5px; line-height: 1.5; }
+.execution-control-status.visible { display: block; padding: 5px 8px; }
+.execution-control-status[data-state="active"] { color: #ffd58a; background: rgba(245,166,35,.12); }
+.execution-control-status[data-state="success"] { color: #8ce2c1; background: rgba(98,214,178,.10); }
+.execution-control-status[data-state="error"] { color: #ff9b9b; background: rgba(255,92,92,.12); }

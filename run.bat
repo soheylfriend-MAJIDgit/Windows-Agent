@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher (v1.7-19 - direct Drive control + brain mode)
+rem  Windows Agent launcher (v1.7-20 - verified emergency stop control)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================

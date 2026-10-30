@@ -46,7 +46,7 @@ def _read_app_version() -> str:
             return raw
     except (OSError, UnicodeError):
         pass
-    return "1.7-18"
+    return "1.7-20"
 
 APP_VERSION = _read_app_version()
 
@@ -54,10 +54,10 @@ APP_VERSION = _read_app_version()
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
 #  این مقادیر «نسخه پشتیبان» هستند تا حتی بدون گیت هم چیزی نمایش داده شود.
 # ------------------------------------------------------------------
-BUILD_COMMIT = "d47c91e"
-BUILD_SUBJECT = "v1.7-18: brain mode toggle"
-BUILD_DATE_JALALI = "1405/08/03"
-BUILD_TIME_TEHRAN = "14:04"
+BUILD_COMMIT = "unknown"
+BUILD_SUBJECT = "Build identity is resolved from Git HEAD or the run.bat build stamp"
+BUILD_DATE_JALALI = "—"
+BUILD_TIME_TEHRAN = "—"
 
 # منطقه زمانی تهران (بدون وابستگی به تنظیمات ویندوز)
 TEHRAN = timezone(timedelta(hours=3, minutes=30), "Tehran")
@@ -288,7 +288,7 @@ def build_info() -> dict:
     except OSError:
         pass
 
-    # اگر برنامه از طریق بروزرسانی خودکار به‌روز شده باشد، هش واقعی این‌جاست
+    # run.bat هش واقعی Git HEAD را در LocalAppData می‌نویسد؛ فایل قدیمی نباید بر Git HEAD غلبه کند.
     try:
         import json
 
@@ -302,7 +302,10 @@ def build_info() -> dict:
                 source="stamp",
                 source_label="اجرای run.bat",
             )
-            return info
+            # In a Git checkout, prefer the current HEAD below so an old stamp can never
+            # make a newer source tree look like a stale build.
+            if not (base / ".git").exists():
+                return info
     except (OSError, ValueError):
         pass
 
@@ -1158,6 +1161,8 @@ def run_code_job(path: Path, execution_source: str = "دفترچه", execution_m
         if exec_manager is not None:
             exec_manager.set_execution_process(execution_id, proc, path.stem.replace("_", " "), execution_source,
                                                workspace_path=str(path.parent), execution_mode=execution_mode)
+            tracked = next((r for r in exec_manager.get_execution_registry() if r.get("execution_id") == execution_id), {})
+            start_marker = tracked.get("process_start_marker")
             if cancel_event is not None:
                 exec_manager.bind_execution_cancel_event(execution_id, cancel_event)
         deadline = time.monotonic() + CODES_MAX_RUNTIME
@@ -1177,7 +1182,25 @@ def run_code_job(path: Path, execution_source: str = "دفترچه", execution_m
                 stderr_text = (stderr_raw or b"").decode("utf-8", errors="replace")
                 break
             except subprocess.TimeoutExpired:
+                if exec_manager is not None:
+                    exec_manager.snapshot_execution_tree(execution_id, int(proc.pid), start_marker)
                 continue
+        if stop_reason is None and exec_manager is not None:
+            children = exec_manager.snapshot_execution_tree(execution_id, int(proc.pid), start_marker)
+            while children:
+                if cancel_event is not None and cancel_event.is_set():
+                    stop_reason = "CANCELLED"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stop_reason = "TIMEOUT"
+                    break
+                current_row = next((r for r in exec_manager.get_execution_registry() if r.get("execution_id") == execution_id), {})
+                exec_manager.update_execution(execution_id, status="monitoring", stage="monitoring",
+                                              child_pids=children, owned_processes=current_row.get("owned_processes", []),
+                                              last_message="Process اصلی پایان یافت؛ فرزندهای متعلق هنوز پایش می‌شوند.")
+                time.sleep(min(0.1, remaining))
+                children = exec_manager.snapshot_execution_tree(execution_id, int(proc.pid), start_marker)
         if stop_reason:
             if exec_manager is not None:
                 stop_result = exec_manager._terminate_execution_tree(execution_id, proc, 2.0)
@@ -1530,6 +1553,7 @@ class Api:
         self._auto_watch_execution_id = "background_auto_watch"
         self._active_job_execution_id: str | None = None
         self._active_job_cancel_event = threading.Event()
+        self._emergency_control_status = ""
         self.auto_next = 0.0
         # شناسنامه‌ی ساخت یک‌بار خوانده می‌شود (git در هر ۰.۷ ثانیه اجرا نشود)
         self.build = build_info()
@@ -2349,6 +2373,7 @@ class Api:
             info["secret_file"] = str(manager_client.SECRET_FILE)
         except Exception:
             pass
+        info["emergency_control_status"] = self._emergency_control_status or info.get("emergency_control_status", "")
         info["connected"] = bool(self.status.get("manager"))
         info["note"] = str(self.status_note.get("manager") or "در انتظار کلید")
         return info
@@ -2404,6 +2429,21 @@ class Api:
             self.log(f"لغو محلی ممکن نشد: {exc}")
             self.toast("لغو محلی ممکن نشد", "error")
             return {"ok": False, "state": self.get_state()}
+
+    def prepare_emergency_stop_all(self, reason: str = "توقف فوری همه اجراها از سایت مدیریت", control_id: str = "") -> None:
+        """Pause scheduling (without changing Automatic) and show the site emergency request locally."""
+        self._execution_monitor_paused = True
+        self._watch_stop.set()
+        self._emergency_control_status = "درخواست توقف همه از سایت مدیریت دریافت شد"
+        self.log(f"توقف اضطراری سایت مدیریت دریافت شد{(' (' + control_id + ')') if control_id else ''}؛ Automatic تغییر نکرد.")
+
+    def set_emergency_control_status(self, message: str) -> None:
+        """Update the live-center line from the independent Manager heartbeat worker."""
+        text = str(message or "")[:240]
+        if text == self._emergency_control_status:
+            return
+        self._emergency_control_status = text
+        self.log(text)
 
     def manager_stop_execution(self, execution_id: str, confirmed: bool = False) -> dict:
         """درخواست توقف یک اجرای ثبت‌شده؛ PID فقط از registry و marker معتبر دنبال می‌شود."""
@@ -2573,7 +2613,14 @@ class Api:
         self.settings["auto"] = enabled
         save_settings(self.settings)
         if enabled:
-            self._execution_monitor_paused = False
+            emergency_in_progress = False
+            try:
+                import manager_client
+                emergency_in_progress = manager_client.emergency_stop_in_progress()
+            except Exception:
+                pass
+            if not emergency_in_progress:
+                self._execution_monitor_paused = False
             self.sound("success")
             self.log("⚡ حالت خودکار روشن شد — بررسی و اجرا بدون پرسیدن.")
             self.toast("حالت خودکار روشن شد")
