@@ -50,6 +50,7 @@
 
   <!-- ─────────────── مغز ایجنت ─────────────── -->
   <section class="view" data-tab="main">
+    <div class="brain-top-grid">
     <article class="card brain-mode-card" id="brain-mode-card">
       <img class="brain-mode-art" src="/ui/brain-mark.png" alt="مغز ایجنت ویندوز">
       <span class="label">حالت اجرای ایجنت</span>
@@ -61,6 +62,20 @@
       </label>
       <span class="brain-mode-state" id="mode-state-label">حالت دستی</span>
     </article>
+
+    <article class="card execution-center-card" id="execution-center-card">
+      <div class="execution-center-head">
+        <div>
+          <span class="label">مرکز اجرای زنده</span>
+          <p class="execution-center-subtitle">پردازش‌های دریافت‌شده از مدیریت، وضعیت واقعی و کنترل توقف امن</p>
+        </div>
+        <span class="execution-live-dot" aria-label="به‌روزرسانی زنده"></span>
+      </div>
+      <div class="execution-counters" id="execution-counters"></div>
+      <button class="btn danger execution-stop-all" id="execution-stop-all" type="button">توقف فوری همه اجراهای ایجنت</button>
+      <div class="execution-groups" id="execution-groups"></div>
+    </article>
+    </div>
 
     <article class="card system-card">
       <span class="label">وضعیت سیستم</span>

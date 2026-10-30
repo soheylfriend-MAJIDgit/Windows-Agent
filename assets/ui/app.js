@@ -290,6 +290,7 @@
     $('theme-btn').title = s.theme === 'light' ? 'رفتن به تم تاریک' : 'رفتن به تم روشن';
 
     renderMode(s);
+    renderExecutionCenter((s.manager && s.manager.executions) || []);
     renderStats(s);
     renderPaths(s);
     renderCodes(s);
@@ -300,6 +301,78 @@
     renderManage(s);
     renderBot(s);
     renderEvents(s.events);
+  }
+
+  var EXECUTION_STATUS_LABELS = {
+    preparing: 'در حال آماده‌سازی', waiting_confirmation: 'در انتظار تأیید کاربر', running: 'در حال اجرا',
+    monitoring: 'پایش پس‌زمینه فعال', stopping: 'در حال توقف Processها', cancelled: 'متوقف شد',
+    succeeded: 'با موفقیت پایان یافت', failed: 'ناموفق', timed_out: 'پایان زمان مجاز',
+    rejected: 'ردشده توسط کاربر', termination_failed: 'توقف ناموفق؛ بررسی دستی لازم است'
+  };
+  var EXECUTION_TERMINAL = ['cancelled', 'succeeded', 'failed', 'timed_out', 'rejected', 'termination_failed'];
+
+  function tehranJalaliStamp(iso) {
+    if (!iso) return '—';
+    var value = new Date(iso);
+    if (isNaN(value.getTime())) return '—';
+    var t = new Date(value.getTime() + (3.5 * 60 * 60 * 1000));
+    var j = g2j(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+    return fa(j[0] + '/' + pad2(j[1]) + '/' + pad2(j[2]) + ' ' + pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ':' + pad2(t.getUTCSeconds()));
+  }
+
+  function executionDuration(row) {
+    var start = new Date(row.started_at || row.updated_at || '').getTime();
+    if (!start || isNaN(start)) return '—';
+    var end = row.completed_at ? new Date(row.completed_at).getTime() : Date.now();
+    var seconds = Math.max(0, Math.floor((end - start) / 1000));
+    var min = Math.floor(seconds / 60), sec = seconds % 60;
+    return min ? fa(min + ' دقیقه ' + sec + ' ثانیه') : fa(sec + ' ثانیه');
+  }
+
+  function renderExecutionCenter(rows) {
+    var box = $('execution-groups');
+    if (!box) return;
+    rows = Array.isArray(rows) ? rows : [];
+    var activeStatuses = ['preparing', 'waiting_confirmation', 'running', 'monitoring'];
+    var active = rows.filter(function (r) { return EXECUTION_TERMINAL.indexOf(r.status) < 0 && r.status !== 'stopping'; });
+    var stopping = rows.filter(function (r) { return r.status === 'stopping'; });
+    var finished = rows.filter(function (r) { return EXECUTION_TERMINAL.indexOf(r.status) >= 0; });
+    var runningCount = rows.filter(function (r) { return r.status === 'running'; }).length;
+    var preparingCount = rows.filter(function (r) { return r.status === 'preparing' || r.status === 'waiting_confirmation' || r.status === 'monitoring'; }).length;
+    var finishedCount = finished.length;
+    var counters = $('execution-counters');
+    if (counters) counters.innerHTML = [
+      ['running', runningCount, 'در حال اجرا'], ['preparing', preparingCount, 'در حال آماده‌سازی'],
+      ['stopping', stopping.length, 'در حال توقف'], ['finished', finishedCount, 'پایان‌یافته']
+    ].map(function (x) { return '<div class="execution-counter ' + x[0] + '"><strong>' + fa(x[1]) + '</strong><span>' + x[2] + '</span></div>'; }).join('');
+
+    function rowHtml(r) {
+      var id = String(r.execution_id || r.command_id || '');
+      var status = String(r.status || 'preparing');
+      var label = EXECUTION_STATUS_LABELS[status] || 'در حال آماده‌سازی';
+      var pids = Array.isArray(r.child_pids) ? r.child_pids : [];
+      var pidText = r.pid ? ('Process اصلی PID ' + fa(r.pid) + ' · والد Agent PID ' + fa(r.parent_pid || '—') + ' · فرزندها: ' + (pids.length ? pids.map(function (p) { return fa(p); }).join(', ') : '—')) : 'Process هنوز شروع نشده';
+      var mode = r.execution_mode === 'background' ? 'پس‌زمینه' : 'foreground';
+      var cmd = r.command_id ? String(r.command_id) : id;
+      var shortCmd = cmd.length > 24 ? cmd.slice(0, 21) + '…' : cmd;
+      var meta = [esc(String(r.source || 'فرمان مدیریتی')), esc(shortCmd), esc(mode), esc(pidText),
+        'شروع: ' + esc(tehranJalaliStamp(r.started_at)), 'مدت: ' + esc(executionDuration(r)), 'مرحله: ' + esc(String(r.stage || '—'))].join(' · ');
+      var button = activeStatuses.indexOf(status) >= 0 || status === 'stopping'
+        ? '<div class="execution-row-actions"><button class="btn danger execution-stop-one" data-execution-stop="' + esc(id) + '" type="button" ' + (status === 'stopping' ? 'disabled' : '') + '>' + (status === 'stopping' ? 'در حال توقف…' : 'توقف فوری این اجرا') + '</button></div>' : '';
+      return '<article class="execution-row" data-status="' + esc(status) + '"><div class="execution-row-head"><span class="execution-row-title">' + esc(r.title || r.job_name || 'اجرای ایجنت') + '</span><span class="execution-row-state">' + esc(label) + '</span></div>' +
+        '<div class="execution-row-meta">' + meta + '</div>' +
+        (r.last_message ? '<div class="execution-row-message">' + esc(r.last_message) + '</div>' : '') +
+        (r.error_summary ? '<div class="execution-row-message execution-row-error">' + esc(r.error_summary) + '</div>' : '') + button + '</article>';
+    }
+    function group(title, values) {
+      if (!values.length) return '';
+      return '<section class="execution-group"><h3 class="execution-group-title">' + title + ' · ' + fa(values.length) + '</h3>' + values.map(rowHtml).join('') + '</section>';
+    }
+    if (!rows.length) {
+      box.innerHTML = '<div class="execution-empty"><strong>اجرای فعالی وجود ندارد</strong><span>فرمان‌های دریافت‌شده از مدیریت و پایش‌های پس‌زمینه در این بخش نمایش داده می‌شوند.</span></div>';
+      return;
+    }
+    box.innerHTML = group('فعال', active) + group('در حال توقف', stopping) + group('اخیراً پایان‌یافته', finished);
   }
 
   function renderMode(s) {
@@ -815,6 +888,15 @@
 
     $('auto-switch').addEventListener('change', function () {
       call('toggle_auto').then(function (res) { handleResult(res, 'toggle_auto', null); });
+    });
+
+    $('execution-stop-all').addEventListener('click', function () {
+      openModal({title: 'توقف همه اجراهای ایجنت', message: 'همه اجراهای فعال و پایش‌های پس‌زمینه متعلق به Windows Agent متوقف شوند؟ این عملیات برنامه‌های نامرتبط ویندوز را نمی‌بندد.'}, 'manager_stop_all_executions', null);
+    });
+    $('execution-groups').addEventListener('click', function (event) {
+      var button = event.target.closest('[data-execution-stop]');
+      if (!button || button.disabled) return;
+      openModal({title: 'توقف فوری این اجرا', message: 'این اجرا و تمام Processهای فرزند متعلق به آن متوقف شوند؟ برنامه‌های نامرتبط ویندوز بسته نمی‌شوند.'}, 'manager_stop_execution', button.dataset.executionStop);
     });
 
     $('mute-btn').addEventListener('click', function () {

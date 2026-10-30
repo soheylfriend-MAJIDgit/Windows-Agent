@@ -729,8 +729,9 @@ def _system_proxy() -> str | None:
         return os.environ.get("HTTPS_PROXY")
 
 
-def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes | None:
-    """دریافت محتوا؛ اگر پروکسی سیستم فعال باشد از آن استفاده می‌کند."""
+def _http_get_bytes(url: str, timeout: float = 30.0, cancel_check=None) -> bytes | None:
+    """دریافت محتوا؛ در صورت نیاز خواندن شبکه را با checkpoint لغو انجام می‌دهد."""
+    import socket
     import urllib.error
     import urllib.request
 
@@ -744,11 +745,30 @@ def _http_get_bytes(url: str, timeout: float = 30.0) -> bytes | None:
         url, headers={"User-Agent": "Windows-Agent", "Cache-Control": "no-cache"}
     )
     try:
-        with opener.open(request, timeout=timeout) as response:
+        if cancel_check and cancel_check(): return None
+        connect_timeout = min(timeout, 1.0) if cancel_check else timeout
+        with opener.open(request, timeout=connect_timeout) as response:
             if response.status != 200:
                 return None
-            return response.read()
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            if not cancel_check:
+                return response.read()
+            sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+            if sock is not None:
+                try: sock.settimeout(0.5)
+                except OSError: pass
+            chunks = []
+            deadline = time.monotonic() + timeout
+            while True:
+                if cancel_check(): return None
+                try:
+                    chunk = response.read(64 * 1024)
+                except (socket.timeout, TimeoutError):
+                    if time.monotonic() >= deadline: return None
+                    continue
+                if not chunk: break
+                chunks.append(chunk)
+            return b"".join(chunks)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
         return None
 
 
@@ -962,13 +982,13 @@ def write_bot_api_file(port: int, token: str) -> None:
 
 
 def repo_zip(
-    owner: str = GITHUB_OWNER, repo: str = GITHUB_REPO, branch: str = GITHUB_BRANCH
+    owner: str = GITHUB_OWNER, repo: str = GITHUB_REPO, branch: str = GITHUB_BRANCH, cancel_check=None
 ) -> bytes | None:
     """zip کل ریپو (بدون کلید API، بدون محدودیت درخواست)."""
     if not (owner and repo and branch):
         return None
     url = GITHUB_ZIP.format(owner=owner, repo=repo, branch=branch)
-    return _http_get_bytes(url, timeout=40)
+    return _http_get_bytes(url, timeout=40, cancel_check=cancel_check)
 
 
 def ensure_codes_dir() -> Path:
@@ -1096,11 +1116,13 @@ def save_codes_state(state: dict) -> None:
         pass
 
 
-def run_code_job(path: Path) -> tuple[bool, str, str]:
+def run_code_job(path: Path, execution_source: str = "دفترچه", execution_mode: str = "foreground", cancel_event: threading.Event | None = None) -> tuple[bool, str, str]:
     """یک فایل پایتون را اجرا و نتیجه را در logs گوگل درایو ذخیره می‌کند.
 
     خروجی: (موفق بود؟، نام فایل، متن نتیجه)
     """
+    if cancel_event is not None and cancel_event.is_set():
+        return False, path.name, "فرمان لغو شد؛ Process پیش از شروع اجرا نشد."
     started = time.time()
     dest_dir, _ = resolve_report_dir()
     try:
@@ -1112,29 +1134,86 @@ def run_code_job(path: Path) -> tuple[bool, str, str]:
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
 
+    import uuid
+    execution_id = f"local_{uuid.uuid4().hex}"
+    exec_manager = None
+    proc = None
+    start_marker = None
     exit_code: int | str = "?"
     stdout_text = stderr_text = ""
     try:
-        completed = subprocess.run(
-            [sys.executable, str(path)],
-            cwd=str(path.parent),
-            capture_output=True,
-            timeout=CODES_MAX_RUNTIME,
-            env=env,
-            creationflags=(subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0),
-        )
-        exit_code = completed.returncode
-        stdout_text = completed.stdout.decode("utf-8", errors="replace")
-        stderr_text = completed.stderr.decode("utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        exit_code = "TIMEOUT"
-        stderr_text = f"اجرا بیش از {CODES_MAX_RUNTIME} ثانیه طول کشید."
+        try:
+            import manager_client as exec_manager
+            exec_manager.register_execution(execution_id, path.stem.replace("_", " "), execution_source, execution_mode,
+                                            status="preparing", stage="preparing", last_message="در حال آماده‌سازی اجرا…")
+        except Exception:
+            exec_manager = None
+        flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if IS_WINDOWS else 0
+        kwargs = {"cwd": str(path.parent), "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "env": env}
+        if IS_WINDOWS:
+            kwargs["creationflags"] = flags
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen([sys.executable, "-u", str(path)], **kwargs)
+        if exec_manager is not None:
+            exec_manager.set_execution_process(execution_id, proc, path.stem.replace("_", " "), execution_source,
+                                               workspace_path=str(path.parent), execution_mode=execution_mode)
+            if cancel_event is not None:
+                exec_manager.bind_execution_cancel_event(execution_id, cancel_event)
+        deadline = time.monotonic() + CODES_MAX_RUNTIME
+        stop_reason = None
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                stop_reason = "CANCELLED"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stop_reason = "TIMEOUT"
+                break
+            try:
+                stdout_raw, stderr_raw = proc.communicate(timeout=min(0.2, remaining))
+                exit_code = proc.returncode
+                stdout_text = (stdout_raw or b"").decode("utf-8", errors="replace")
+                stderr_text = (stderr_raw or b"").decode("utf-8", errors="replace")
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if stop_reason:
+            if exec_manager is not None:
+                stop_result = exec_manager._terminate_execution_tree(execution_id, proc, 2.0)
+            else:
+                stop_result = {"ok": False, "remaining": [proc.pid]}
+            exit_code = stop_reason if stop_result.get("ok") else "TERMINATION_FAILED"
+            if stop_reason == "CANCELLED":
+                stderr_text = ("درخواست توقف ثبت شد. " if stop_result.get("ok") else
+                               f"توقف کامل انجام نشد؛ PIDهای باقی‌مانده: {stop_result.get('remaining', [])}")
+            else:
+                stderr_text = (f"اجرا بیش از {CODES_MAX_RUNTIME} ثانیه طول کشید. " if stop_result.get("ok") else
+                               f"توقف کامل انجام نشد؛ PIDهای باقی‌مانده: {stop_result.get('remaining', [])}")
+            try:
+                stdout_raw, stderr_raw = proc.communicate(timeout=0.5)
+                stdout_text = (stdout_raw or b"").decode("utf-8", errors="replace")
+                stderr_text += "\n" + (stderr_raw or b"").decode("utf-8", errors="replace")
+            except Exception:
+                pass
     except Exception:
         stderr_text = traceback.format_exc()
 
     duration = time.time() - started
     now = tehran_now()
+    registry_row = {}
+    if exec_manager is not None:
+        registry_row = next((r for r in exec_manager.get_execution_registry() if r.get("execution_id") == execution_id), {})
+    was_cancelled = (bool(registry_row.get("cancel_requested_at")) or exit_code == "CANCELLED") and not registry_row.get("remaining_pids")
+    if was_cancelled:
+        exit_code = "CANCELLED"
+        stderr_text = (stderr_text + "\n" if stderr_text else "") + "اجرا و Processهای متعلق به آن متوقف شدند."
     ok = exit_code == 0
+    if exec_manager is not None:
+        row_status = "cancelled" if was_cancelled else ("termination_failed" if exit_code == "TERMINATION_FAILED" else ("succeeded" if ok else ("timed_out" if exit_code == "TIMEOUT" else "failed")))
+        exec_manager.complete_execution(execution_id, row_status,
+                                        "متوقف شد" if was_cancelled else ("با موفقیت پایان یافت" if ok else "ناموفق"),
+                                        exit_code=exit_code, error_summary="" if ok or was_cancelled else stderr_text[-500:])
 
     text = "\n".join(
         [
@@ -1447,6 +1526,10 @@ class Api:
         }
         self._watch_stop = threading.Event()
         self._watch_running = False
+        self._execution_monitor_paused = False
+        self._auto_watch_execution_id = "background_auto_watch"
+        self._active_job_execution_id: str | None = None
+        self._active_job_cancel_event = threading.Event()
         self.auto_next = 0.0
         # شناسنامه‌ی ساخت یک‌بار خوانده می‌شود (git در هر ۰.۷ ثانیه اجرا نشود)
         self.build = build_info()
@@ -2262,6 +2345,7 @@ class Api:
         try:
             import manager_client
             info.update(manager_client.get_view_state())
+            info["executions"] = manager_client.get_execution_registry()
             info["secret_file"] = str(manager_client.SECRET_FILE)
         except Exception:
             pass
@@ -2319,6 +2403,46 @@ class Api:
         except Exception as exc:
             self.log(f"لغو محلی ممکن نشد: {exc}")
             self.toast("لغو محلی ممکن نشد", "error")
+            return {"ok": False, "state": self.get_state()}
+
+    def manager_stop_execution(self, execution_id: str, confirmed: bool = False) -> dict:
+        """درخواست توقف یک اجرای ثبت‌شده؛ PID فقط از registry و marker معتبر دنبال می‌شود."""
+        if not confirmed:
+            return {"ok": False, "state": self.get_state()}
+        try:
+            import manager_client
+            if execution_id == self._auto_watch_execution_id:
+                self._execution_monitor_paused = True
+                self._watch_stop.set()
+            result = manager_client.request_execution_stop(str(execution_id), "توقف فوری توسط کاربر از مرکز اجرای زنده")
+            if result.get("ok"):
+                self.log(f"درخواست توقف ثبت شد: {execution_id}")
+                self.toast("در حال توقف Processها…")
+            else:
+                self.toast(result.get("message", "اجرای فعالی پیدا نشد"), "error")
+            return {"ok": bool(result.get("ok")), "result": result, "state": self.get_state()}
+        except Exception as exc:
+            self.log(f"درخواست توقف اجرا ممکن نشد: {type(exc).__name__}")
+            return {"ok": False, "state": self.get_state()}
+
+    def manager_stop_all_executions(self, confirmed: bool = False) -> dict:
+        """توقف همه‌ی اجراهای متعلق؛ watcher هم متوقف می‌شود و Automatic تغییر نمی‌کند."""
+        if not confirmed:
+            return {"ok": False, "state": self.get_state()}
+        try:
+            import manager_client
+            self._execution_monitor_paused = True
+            self._watch_stop.set()
+            manager_client.request_local_cancel("توقف فوری همه اجراهای ایجنت توسط کاربر")
+            result = manager_client.request_stop_all_executions("توقف فوری همه اجراهای ایجنت توسط کاربر")
+            if result.get("count"):
+                self.log(f"درخواست توقف برای {result['count']} اجرای ثبت‌شده ارسال شد.")
+                self.toast("درخواست توقف همه ثبت شد")
+            else:
+                self.toast("اجرای فعالی برای توقف نیست")
+            return {"ok": True, "result": result, "state": self.get_state()}
+        except Exception as exc:
+            self.log(f"توقف همه اجراها ممکن نشد: {type(exc).__name__}")
             return {"ok": False, "state": self.get_state()}
 
     def manager_clear_config(self) -> dict:
@@ -2449,6 +2573,7 @@ class Api:
         self.settings["auto"] = enabled
         save_settings(self.settings)
         if enabled:
+            self._execution_monitor_paused = False
             self.sound("success")
             self.log("⚡ حالت خودکار روشن شد — بررسی و اجرا بدون پرسیدن.")
             self.toast("حالت خودکار روشن شد")
@@ -2623,35 +2748,72 @@ class Api:
     # ------------------------------------------------------------ کارها ---
 
     def _start_job(self, label: str, job) -> None:
+        import uuid
         self.busy = label
         self.emit("busy", label=label)
+        execution_id = f"local_job_{uuid.uuid4().hex}"
+        cancel_event = threading.Event()
+        self._active_job_execution_id = execution_id
+        self._active_job_cancel_event = cancel_event
+        execution_source = "پایش پس‌زمینه" if label == "دور خودکار" else ("دفترچه" if "اجرا" in label else "فرمان مدیریتی")
+        execution_mode = "background" if execution_source == "پایش پس‌زمینه" else "foreground"
+        exec_manager = None
+        try:
+            import manager_client as exec_manager
+            exec_manager.register_execution(execution_id, label, execution_source, execution_mode,
+                                            status="running", stage="running", last_message="کار ایجنت آغاز شد.")
+            exec_manager.bind_execution_cancel_event(execution_id, cancel_event)
+        except Exception:
+            exec_manager = None
 
         def runner() -> None:
+            final_status = "succeeded"
+            error_summary = ""
             try:
-                job()
+                if cancel_event.is_set():
+                    final_status = "cancelled"
+                else:
+                    job()
+                    final_status = "cancelled" if cancel_event.is_set() else "succeeded"
             except Exception as exc:  # noqa: BLE001
                 detail = traceback.format_exc()
+                error_summary = str(exc)
+                final_status = "failed"
                 self.report_error(f"خطا در «{label}»: {exc}", detail)
                 self.sound("error")
             finally:
+                try:
+                    self._scan_codes()
+                except Exception:
+                    pass
+                try:
+                    self._refresh_shots()
+                except Exception:
+                    pass
+                if exec_manager is not None:
+                    text = "متوقف شد" if final_status == "cancelled" else ("با موفقیت پایان یافت" if final_status == "succeeded" else "ناموفق")
+                    exec_manager.complete_execution(execution_id, final_status, text, error_summary=error_summary)
+                    with exec_manager._execution_lock:
+                        exec_manager._command_cancel_events.pop(execution_id, None)
                 self.busy = None
+                self._active_job_execution_id = None
                 self.emit("idle")
-                self._scan_codes()
-                self._refresh_shots()
-                if self.settings.get("auto"):
+                if self.settings.get("auto") and not self._execution_monitor_paused:
                     self._arm_watch()
 
-        threading.Thread(target=runner, daemon=True).start()
+        threading.Thread(target=runner, daemon=True, name=f"agent-job-{execution_id[-8:]}").start()
 
     def _job_capture(self) -> None:
+        if self._active_job_cancel_event.is_set(): return
         self.log(f"📸 باز کردن {LMARENA_URL} در کروم…")
         try:
             self.log(f"   {open_in_chrome(LMARENA_URL)}")
         except Exception as exc:  # noqa: BLE001
             self.log(f"   ⚠️ {exc}")
         self.log(f"   صبر {PAGE_LOAD_SECONDS} ثانیه برای کامل شدن صفحه…")
-        time.sleep(PAGE_LOAD_SECONDS)
+        if self._active_job_cancel_event.wait(PAGE_LOAD_SECONDS): return
         dest, on_drive = resolve_screenshot_dir()
+        if self._active_job_cancel_event.is_set(): return
         path = take_screenshot(dest)
         self.sound("shutter")
         self.log(f"✅ اسکرین‌شات ذخیره شد → {path}")
@@ -2670,9 +2832,12 @@ class Api:
         self.toast("گزارش ذخیره شد")
 
     def _job_fetch(self) -> None:
+        if self._active_job_cancel_event.is_set(): return
         owner, repo, branch = self.collab_info()
         self.log(f"📥 بررسی {owner}/{repo} @ {branch}")
-        data = repo_zip(owner, repo, branch)
+        data = repo_zip(owner, repo, branch, cancel_check=self._active_job_cancel_event.is_set)
+        if self._active_job_cancel_event.is_set(): return
+        if self._active_job_cancel_event.is_set(): return
         if not data:
             self.status["collab"] = False
             self.status_note["collab"] = "قطع"
@@ -2711,6 +2876,7 @@ class Api:
 
         written = 0
         for name, content in new_files.items():
+            if self._active_job_cancel_event.is_set(): return
             try:
                 (codes_dir / name).write_bytes(content)
                 written += 1
@@ -2721,9 +2887,11 @@ class Api:
         self.log(f"📥 {written} فایل در پوشه CODES ذخیره شد.")
         self.sound("success")
         self.toast(f"{written} فایل دانلود شد")
+        if self._active_job_cancel_event.is_set(): return
         self._scan_codes()
+        if self._active_job_cancel_event.is_set(): return
 
-        if self.settings.get("auto"):
+        if self.settings.get("auto") and not self._active_job_cancel_event.is_set():
             self._job_run_new()
 
     def _job_run_new(self) -> None:
@@ -2742,17 +2910,20 @@ class Api:
             self.log("✅ کد جدیدی برای اجرا نیست.")
             self.toast("کد جدیدی نیست")
             return
-        self._run_paths(pending)
+        self._run_paths(pending, source="پایش پس‌زمینه" if self.settings.get("auto") else "دفترچه")
 
     def _job_run_single(self, path: Path) -> None:
         self.log(f"▶️ اجرای دوباره {path.name}")
         self._run_paths([path])
 
-    def _run_paths(self, paths: list[Path]) -> None:
+    def _run_paths(self, paths: list[Path], source: str = "دفترچه") -> None:
         self.sound("run")
         for path in paths:
+            if self._active_job_cancel_event.is_set(): break
             self.log(f"▶️ اجرای {path.name}")
-            ok, name, text = run_code_job(path)
+            ok, name, text = run_code_job(path, execution_source=source,
+                                         execution_mode="background" if source == "پایش پس‌زمینه" else "foreground",
+                                         cancel_event=self._active_job_cancel_event)
             for line in text.splitlines()[-8:]:
                 self.log(f"   {line}")
             self.log(f"{'✅ پایان' if ok else '❌ خطا در'} {name}")
@@ -2763,21 +2934,31 @@ class Api:
     # -------------------------------------------- حلقه خودکار و وضعیت‌ها ---
 
     def _arm_watch(self) -> None:
+        if self._execution_monitor_paused:
+            return
         self.auto_next = time.time() + self._auto_total()
         if self._watch_running:
             return
         self._watch_running = True
         self._watch_stop.clear()
+        try:
+            import manager_client
+            manager_client.register_execution(self._auto_watch_execution_id, "پایش پس‌زمینه خودکار", "پایش پس‌زمینه", "background",
+                                              status="monitoring", stage="monitoring", last_message="پایش پس‌زمینه فعال")
+        except Exception:
+            manager_client = None
 
         def loop() -> None:
             while not self._watch_stop.is_set():
-                if not self.settings.get("auto"):
+                if not self.settings.get("auto") or self._execution_monitor_paused:
                     break
                 if self.busy is None and time.time() >= self.auto_next:
                     if self.busy is None:
                         self._start_job("دور خودکار", self._auto_cycle)
                 self._watch_stop.wait(0.5)
             self._watch_running = False
+            if manager_client is not None:
+                manager_client.complete_execution(self._auto_watch_execution_id, "cancelled", "پایش پس‌زمینه متوقف شد")
 
         threading.Thread(target=loop, daemon=True).start()
 

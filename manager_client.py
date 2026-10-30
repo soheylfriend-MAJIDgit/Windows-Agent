@@ -49,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.request
 
@@ -60,7 +61,7 @@ DEFAULT_EXPECTED_REPLY = "سلام ایجنت مدیریت."
 HEARTBEAT_INTERVAL = 30.0
 POLL_INTERVAL = 5.0
 COMMAND_CLAIM_INTERVAL = 3.0
-CONFIRM_POLL_INTERVAL = 2.0
+CONFIRM_POLL_INTERVAL = 0.25
 RUNNING_CONTROL_POLL_INTERVAL = 1.2
 HTTP_TIMEOUT = 5.0
 BACKOFF_STEPS = (5.0, 15.0, 30.0, 60.0)
@@ -625,6 +626,12 @@ def _get_process_start_marker(pid: int) -> float | None:
     if pid <= 0:
         return None
     if IS_WINDOWS:
+        from ctypes import wintypes
+        _kernel32.OpenProcess.restype = ctypes.c_void_p
+        _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        _kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p, ctypes.POINTER(_FILETIME), ctypes.POINTER(_FILETIME), ctypes.POINTER(_FILETIME), ctypes.POINTER(_FILETIME)]
+        _kernel32.GetProcessTimes.restype = wintypes.BOOL
+        _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
         if not handle:
@@ -736,58 +743,165 @@ def spawn_job_process(
     return subprocess.Popen([sys.executable, "-u", str(job_path)], **kwargs)
 
 
-def terminate_tree(
-    proc: subprocess.Popen | None,
-    expected_marker: float | None = None,
-    timeout_seconds: float = 20.0,
-) -> bool:
-    """توقف درخت فرآیند با taskkill یا process group، با سقف زمانی اختیاری."""
-    if proc is None:
-        return False
-    if proc.poll() is not None:
-        return True
+def _windows_process_snapshot() -> dict[int, int]:
+    """Snapshot PID→parent PID using Toolhelp; process names are never used for ownership."""
+    if not IS_WINDOWS:
+        return {}
+    from ctypes import wintypes
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+    k = ctypes.windll.kernel32
+    k.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k.Process32FirstW.restype = wintypes.BOOL
+    k.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k.Process32NextW.restype = wintypes.BOOL
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k.CreateToolhelp32Snapshot(2, 0)
+    if snap == wintypes.HANDLE(-1).value:
+        return {}
+    out: dict[int, int] = {}
+    try:
+        e = PROCESSENTRY32W(); e.dwSize = ctypes.sizeof(e)
+        if k.Process32FirstW(snap, ctypes.byref(e)):
+            while True:
+                out[int(e.th32ProcessID)] = int(e.th32ParentProcessID)
+                if not k.Process32NextW(snap, ctypes.byref(e)): break
+    finally:
+        k.CloseHandle(snap)
+    return out
 
-    deadline = max(0.1, float(timeout_seconds))
-    started = time.monotonic()
-    pid = int(proc.pid)
-    if expected_marker is not None and not is_tracked_process_alive(pid, expected_marker):
-        return False
 
-    if IS_WINDOWS:
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
-                timeout=max(0.1, min(15.0, deadline * 0.75)),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except Exception:
-            pass
-    else:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+def _owned_descendants(root_pid: int) -> list[dict]:
+    parents = _windows_process_snapshot(); seen = {int(root_pid)}; todo = [int(root_pid)]; out = []
+    while todo:
+        parent = todo.pop(0)
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in seen:
+                seen.add(pid); todo.append(pid)
+                out.append({"pid": pid, "parent_pid": ppid, "start_marker": _get_process_start_marker(pid)})
+    return out
 
-    remaining = max(0.0, deadline - (time.monotonic() - started))
-    if remaining > 0:
+
+def _marker_matches(pid: int, marker: float | None) -> bool:
+    current = _get_process_start_marker(int(pid))
+    return current is not None and (marker is None or abs(current - float(marker)) <= 0.02)
+
+
+class _RecoveredProcessHandle:
+    def __init__(self, pid: int, marker: float | None): self.pid, self.marker = int(pid), marker
+    def poll(self): return None if _marker_matches(self.pid, self.marker) else 0
+    def wait(self, timeout=None):
+        end = time.monotonic() + (timeout or 0)
+        while self.poll() is None and time.monotonic() < end: time.sleep(0.02)
+        if self.poll() is None: raise subprocess.TimeoutExpired("recovered-process", timeout)
+        return 0
+    def send_signal(self, _sig): return None
+
+
+def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, execution_id="", known_owned=None) -> dict:
+    if proc is None: return {"ok": False, "remaining": [], "child_pids": [], "duration": 0.0}
+    started = time.monotonic(); deadline = started + max(0.1, float(timeout_seconds)); root = int(proc.pid)
+    if expected_marker is None: expected_marker = _get_process_start_marker(root)
+    try: process_still_running = proc.poll() is None
+    except Exception: process_still_running = False
+    if expected_marker is None and process_still_running:
+        remaining = [root]
+        if execution_id:
+            msg = f"توقف امن ممکن نیست؛ start marker برای PID {root} قابل تأیید نبود."
+            add_execution_event(execution_id, "termination_failed", pid=root, remainingPids=remaining, reason="start marker unavailable")
+            update_execution(execution_id, status="termination_failed", stage="termination_failed", remaining_pids=remaining,
+                             error_summary=msg, last_message=msg)
+        return {"ok": False, "remaining": remaining, "child_pids": [], "duration": time.monotonic()-started,
+                "error": "start_marker_unavailable"}
+    root_alive = expected_marker is not None and _marker_matches(root, expected_marker)
+    owned: dict[int, dict] = {}
+    for item in (known_owned or []):
         try:
-            proc.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-    else:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    return True
+            pid, marker = int(item.get("pid")), item.get("start_marker")
+            if pid > 0 and marker is not None and _marker_matches(pid, marker):
+                owned[pid] = {"pid": pid, "parent_pid": item.get("parent_pid"), "start_marker": marker}
+        except Exception: pass
+    if root_alive: owned[root] = {"pid": root, "parent_pid": os.getpid(), "start_marker": expected_marker}
+    if not owned: return {"ok": True, "remaining": [], "child_pids": [], "duration": time.monotonic()-started}
+    def discover():
+        if root_alive:
+            for item in _owned_descendants(root):
+                if item["start_marker"] is not None:
+                    old = owned.get(item["pid"])
+                    if old is None or old.get("start_marker") == item["start_marker"]: owned[item["pid"]] = item
+    discover()
+    children = sorted(pid for pid in owned if pid != root)
+    if execution_id:
+        update_execution(execution_id, status="stopping", stage="termination_started", child_pids=children,
+                         owned_processes=list(owned.values()), last_message="در حال توقف Processهای متعلق…")
+        add_execution_event(execution_id, "child_processes_discovered", pid=root, childPids=children, reason="verified parent tree")
+    if IS_WINDOWS and root_alive:
+        try: proc.send_signal(getattr(signal, "CTRL_BREAK_EVENT", 1))
+        except Exception: pass
+    elif not IS_WINDOWS and root_alive:
+        try: os.killpg(os.getpgid(root), signal.SIGTERM)
+        except Exception: pass
+    grace_end = min(deadline, time.monotonic()+0.45)
+    while time.monotonic() < grace_end:
+        discover()
+        if all(not _marker_matches(pid, it.get("start_marker")) for pid,it in owned.items()): break
+        time.sleep(0.025)
+    while time.monotonic() < deadline:
+        discover(); alive = [(pid,it) for pid,it in owned.items() if _marker_matches(pid,it.get("start_marker"))]
+        if not alive: break
+        for pid,it in sorted(alive, key=lambda pair: pair[0] == root):
+            if not _marker_matches(pid,it.get("start_marker")): continue
+            if IS_WINDOWS:
+                try:
+                    from ctypes import wintypes
+                    k=ctypes.windll.kernel32; k.OpenProcess.restype=ctypes.c_void_p
+                    k.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+                    k.TerminateProcess.argtypes=[ctypes.c_void_p,wintypes.UINT]; k.TerminateProcess.restype=wintypes.BOOL
+                    k.CloseHandle.argtypes=[ctypes.c_void_p]
+                    h=k.OpenProcess(0x0001|0x1000,False,pid)
+                    if h:
+                        try:
+                            if _marker_matches(pid,it.get("start_marker")): k.TerminateProcess(h,1)
+                        finally: k.CloseHandle(h)
+                except Exception: pass
+            else:
+                try: os.kill(pid, signal.SIGKILL)
+                except Exception: pass
+        time.sleep(0.025)
+    discover(); remaining=sorted(pid for pid,it in owned.items() if _marker_matches(pid,it.get("start_marker")))
+    try: proc.wait(timeout=max(0.01,min(0.1,deadline-time.monotonic())))
+    except Exception: pass
+    children=sorted(pid for pid in owned if pid != root); duration=time.monotonic()-started
+    result={"ok":not remaining,"remaining":remaining,"child_pids":children,"duration":duration,"owned_processes":list(owned.values())}
+    if execution_id:
+        if remaining:
+            add_execution_event(execution_id,"termination_failed",pid=root,childPids=children,remainingPids=remaining,durationSeconds=round(duration,3))
+            update_execution(execution_id,status="termination_failed",stage="termination_failed",remaining_pids=remaining,
+                             child_pids=children,error_summary=f"توقف کامل نشد؛ PIDهای باقی‌مانده: {remaining}",last_message="توقف ناموفق؛ بررسی دستی لازم است")
+        else:
+            add_execution_event(execution_id,"termination_forced",pid=root,childPids=children,remainingPids=[],durationSeconds=round(duration,3))
+            update_execution(execution_id,child_pids=children,remaining_pids=[],last_message="توقف Processها تأیید شد.")
+    return result
+
+
+def _terminate_execution_tree(execution_id: str, proc, timeout_seconds: float = 2.0) -> dict:
+    row=next((r for r in get_execution_registry() if r.get("execution_id")==execution_id),{})
+    result=_terminate_process_tree(proc,row.get("process_start_marker"),timeout_seconds,execution_id,row.get("owned_processes") or [])
+    if result.get("ok"):
+        with _execution_lock: _process_handles.pop(execution_id,None)
+    return result
+
+
+def terminate_tree(proc, expected_marker=None, timeout_seconds=20.0, execution_id="") -> bool:
+    """Marker-verified process-tree stop; never kills by executable name."""
+    row=next((r for r in get_execution_registry() if r.get("execution_id")==execution_id),{}) if execution_id else {}
+    return bool(_terminate_process_tree(proc,expected_marker,timeout_seconds,execution_id,row.get("owned_processes") or []).get("ok"))
 
 
 # ------------------------------------ PaddleOCR محلی ایزوله و بررسی Preflight ---
@@ -938,6 +1052,7 @@ def invoke_local_ocr(
     ocr_helper: Path | None = None,
     timeout: float = OCR_HELPER_TIMEOUT,
     offline: bool = True,
+    cancel_check=None,
 ) -> tuple[bool, dict, str]:
     """اجرای امن ``paddle_ocr_helper.py`` با سقف زمانی <= ۴۵ ثانیه و توقف درخت فرآیند در صورت Timeout."""
     def_py, def_hlp, _ = get_default_vision_paths()
@@ -990,15 +1105,20 @@ def invoke_local_ocr(
 
     proc = subprocess.Popen(cmd_args, **kwargs)
     start_marker = _get_process_start_marker(int(proc.pid))
-    try:
-        stdout_raw, stderr_raw = proc.communicate(timeout=bounded_timeout)
-    except subprocess.TimeoutExpired:
-        terminate_tree(proc, start_marker)
-        return (
-            False,
-            {"timedOut": True, "pid": proc.pid},
-            f"اجرای PaddleOCR محلی پس از {bounded_timeout} ثانیه دچار Timeout شد و درخت فرآیند متوقف گردید.",
-        )
+    deadline = time.monotonic() + bounded_timeout
+    stdout_raw = stderr_raw = None
+    while True:
+        try:
+            stdout_raw, stderr_raw = proc.communicate(timeout=min(0.2, max(0.05, deadline - time.monotonic())))
+            break
+        except subprocess.TimeoutExpired:
+            if callable(cancel_check) and cancel_check():
+                stopped = terminate_tree(proc, start_marker, timeout_seconds=2.0)
+                return False, {"cancelled": True, "pid": proc.pid, "terminationVerified": stopped}, "لغو هنگام OCR preflight"
+            if time.monotonic() >= deadline:
+                stopped = terminate_tree(proc, start_marker, timeout_seconds=2.0)
+                return (False, {"timedOut": True, "pid": proc.pid, "terminationVerified": stopped},
+                        f"اجرای PaddleOCR محلی پس از {bounded_timeout} ثانیه دچار Timeout شد.")
 
     if existed_before and not img_p.exists():
         return False, {}, "خطای امنیتی: فایل تصویر ورودی نباید توسط helper حذف شود."
@@ -1051,6 +1171,7 @@ def verify_vision_preflight(
     ocr_python: Path | None = None,
     ocr_helper: Path | None = None,
     timeout: float = 15.0,
+    cancel_check=None,
 ) -> tuple[bool, dict, str]:
     """بررسی Preflight پیش از اجرای ``job_arena.py``: صحت مسیرها، عدم فرار با Symlink و اجرای Self-test روی تصویر تست محلی."""
     def _failed(details: dict, message: str) -> tuple[bool, dict, str]:
@@ -1080,6 +1201,7 @@ def verify_vision_preflight(
         ocr_helper=hlp_script,
         timeout=timeout,
         offline=True,
+        cancel_check=cancel_check,
     )
     if not ok_run:
         return _failed(
@@ -1183,6 +1305,9 @@ def is_network_resilience_ready() -> bool:
 
 _lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
+_command_thread: threading.Thread | None = None
+_command_lock = threading.Lock()
+_claim_in_progress = False
 _stop_event = threading.Event()
 _wake_event = threading.Event()
 _api_ref = None
@@ -1209,6 +1334,165 @@ _runtime_info: dict = {
     "ocr_engine": "paddleocr",
     "ocr_local_only": True,
 }
+
+EXECUTION_REGISTRY_FILE = STATE_DIR / "execution_registry.json"
+_execution_lock = threading.RLock()
+_execution_records: dict[str, dict] = {}
+_execution_registry_loaded = False
+_process_handles: dict[str, subprocess.Popen] = {}
+_command_cancel_events: dict[str, threading.Event] = {}
+_EXECUTION_ACTIVE = {"preparing", "waiting_confirmation", "running", "monitoring", "stopping"}
+_EXECUTION_TERMINAL = {"cancelled", "succeeded", "failed", "timed_out", "rejected", "termination_failed"}
+
+
+def _load_execution_registry() -> None:
+    global _execution_registry_loaded, _execution_records
+    with _execution_lock:
+        if _execution_registry_loaded:
+            return
+        _execution_registry_loaded = True
+        try:
+            raw = json.loads(EXECUTION_REGISTRY_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                _execution_records = {str(k): v for k, v in raw.items() if isinstance(k, str) and isinstance(v, dict)}
+        except Exception:
+            _execution_records = {}
+
+
+def _persist_execution_registry() -> None:
+    terminal = sorted((r for r in _execution_records.values() if r.get("status") in _EXECUTION_TERMINAL),
+                      key=lambda r: str(r.get("updated_at") or ""), reverse=True)[:100]
+    keep = {str(r.get("execution_id")): r for r in _execution_records.values() if r.get("status") in _EXECUTION_ACTIVE}
+    keep.update({str(r.get("execution_id")): r for r in terminal})
+    _execution_records.clear(); _execution_records.update(keep)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = EXECUTION_REGISTRY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_execution_records, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(EXECUTION_REGISTRY_FILE)
+    except OSError:
+        pass
+
+
+def register_execution(execution_id: str, title: str, source: str, execution_mode: str = "foreground", **fields) -> dict:
+    _load_execution_registry(); now = utc_iso_now()
+    with _execution_lock:
+        old = _execution_records.get(execution_id, {})
+        row = {"execution_id": execution_id, "command_id": fields.get("command_id") or execution_id,
+               "title": str(title or "اجرای ایجنت")[:180], "source": str(source or "فرمان مدیریتی")[:60],
+               "status": fields.get("status", "preparing"), "stage": fields.get("stage", "preparing"),
+               "pid": fields.get("pid"), "parent_pid": fields.get("parent_pid"),
+               "child_pids": fields.get("child_pids", []), "owned_processes": fields.get("owned_processes", old.get("owned_processes", [])),
+               "process_start_marker": fields.get("process_start_marker"), "started_at": old.get("started_at") or fields.get("started_at") or now,
+               "updated_at": now, "completed_at": fields.get("completed_at"), "cancel_requested_at": fields.get("cancel_requested_at"),
+               "cancel_reason": fields.get("cancel_reason", ""), "exit_code": fields.get("exit_code"),
+               "error_summary": fields.get("error_summary", ""), "execution_mode": execution_mode,
+               "workspace_path": fields.get("workspace_path", ""), "last_message": fields.get("last_message", ""),
+               "remaining_pids": fields.get("remaining_pids", []), "termination_events": old.get("termination_events", [])}
+        _execution_records[execution_id] = row; _persist_execution_registry(); return dict(row)
+
+
+def update_execution(execution_id: str, **fields) -> dict | None:
+    _load_execution_registry()
+    with _execution_lock:
+        row = _execution_records.get(execution_id)
+        if row is None: return None
+        changed = any(row.get(k) != v for k, v in fields.items())
+        if not changed: return dict(row)
+        row.update(fields); row["updated_at"] = utc_iso_now()
+        if row.get("status") in _EXECUTION_TERMINAL and not row.get("completed_at"):
+            row["completed_at"] = row["updated_at"]
+        _persist_execution_registry(); return dict(row)
+
+
+def add_execution_event(execution_id: str, event: str, **data) -> None:
+    _load_execution_registry()
+    with _execution_lock:
+        row = _execution_records.get(execution_id)
+        if row is None: return
+        events = list(row.get("termination_events") or []); events.append({"event": event, "occurred_at": utc_iso_now(), **data})
+        row["termination_events"] = events[-40:]; row["updated_at"] = utc_iso_now(); _persist_execution_registry()
+
+
+def get_execution_registry() -> list[dict]:
+    _load_execution_registry()
+    with _execution_lock: rows = [dict(row) for row in _execution_records.values()]
+    rows.sort(key=lambda r: str(r.get("started_at") or ""), reverse=True); return rows
+
+
+def _execution_alive_pids(execution_id: str) -> list[int]:
+    row = next((r for r in get_execution_registry() if r.get("execution_id") == execution_id), {})
+    out = []
+    for item in row.get("owned_processes", []) or []:
+        try:
+            pid = int(item.get("pid")); marker = item.get("start_marker")
+            if marker is not None and _marker_matches(pid, marker): out.append(pid)
+        except Exception: pass
+    return sorted(set(out))
+
+
+def set_execution_process(execution_id: str, proc: subprocess.Popen, title: str, source: str,
+                          command_id: str | None = None, workspace_path: str = "", execution_mode: str = "foreground") -> None:
+    marker = _get_process_start_marker(int(proc.pid))
+    with _execution_lock:
+        _process_handles[execution_id] = proc
+        existing = _execution_records.get(execution_id)
+    fields = {"pid": int(proc.pid), "parent_pid": os.getpid(), "process_start_marker": marker,
+              "owned_processes": [{"pid": int(proc.pid), "parent_pid": os.getpid(), "start_marker": marker}],
+              "workspace_path": workspace_path}
+    if existing:
+        update_execution(execution_id, **fields, stage="process_started",
+                         status="stopping" if existing.get("status") == "stopping" else "running",
+                         last_message="Process شروع شد.")
+    else:
+        register_execution(execution_id, title, source, execution_mode, command_id=command_id or execution_id,
+                           status="running", stage="process_started", last_message="Process شروع شد.", **fields)
+
+
+def bind_execution_cancel_event(execution_id: str, event: threading.Event) -> None:
+    with _execution_lock:
+        _command_cancel_events[execution_id] = event
+
+
+def complete_execution(execution_id: str, status: str, message: str, exit_code=None, error_summary: str = "") -> None:
+    with _execution_lock:
+        _process_handles.pop(execution_id, None)
+        _command_cancel_events.pop(execution_id, None)
+    update_execution(execution_id, status=status, stage=status, last_message=str(message)[:500],
+                     exit_code=exit_code, error_summary=str(error_summary)[:500])
+
+
+def request_execution_stop(execution_id: str, reason: str = "توقف فوری از مرکز اجرای زنده") -> dict:
+    _load_execution_registry()
+    with _execution_lock:
+        row = _execution_records.get(execution_id)
+        if not row or row.get("status") not in _EXECUTION_ACTIVE: return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
+        row.update(status="stopping", stage="termination_started", cancel_requested_at=utc_iso_now(),
+                   cancel_reason=str(reason)[:500], last_message="درخواست توقف ثبت شد.", updated_at=utc_iso_now())
+        ev = _command_cancel_events.get(execution_id); proc = _process_handles.get(execution_id); _persist_execution_registry()
+    if ev: ev.set()
+    if proc:
+        threading.Thread(target=_stop_execution_process, args=(execution_id, proc), daemon=True,
+                         name=f"stop-{execution_id[:20]}").start()
+    return {"ok": True, "message": "درخواست توقف ثبت شد.", "execution_id": execution_id}
+
+
+def _stop_execution_process(execution_id: str, proc: subprocess.Popen) -> None:
+    result = _terminate_execution_tree(execution_id, proc, 2.0)
+    if result.get("ok"):
+        update_execution(execution_id, status="cancelled", stage="termination_verified", last_message="اجرا و Processهای متعلق به آن متوقف شدند.")
+
+
+def request_stop_all_executions(reason: str = "توقف همه از مرکز اجرای زنده") -> dict:
+    rows = [r for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE]
+    ids = [str(r["execution_id"]) for r in rows]
+    if not ids: return {"ok": True, "count": 0}
+    def batch():
+        threads = [threading.Thread(target=request_execution_stop, args=(eid, reason), daemon=True) for eid in ids]
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=2.5)
+    threading.Thread(target=batch, daemon=True, name="stop-all-executions").start()
+    return {"ok": True, "count": len(ids), "execution_ids": ids}
 
 
 def set_confirm_handler(handler) -> None:
@@ -1603,7 +1887,8 @@ def poll_connection_test_once(api, cfg: dict | None = None) -> tuple[bool, int, 
 
 # ------------------------------------ API صف فرمان و پایش زنده (Command Plane) ---
 
-def _save_active_command_marker(cmd_id: str, pid: int, start_marker: float | None, job_name: str, seq: int) -> None:
+def _save_active_command_marker(cmd_id: str, pid: int | None, start_marker: float | None, job_name: str, seq: int,
+                                stage: str = "running", workspace_path: str = "", cancel_requested: bool = False) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -1612,6 +1897,9 @@ def _save_active_command_marker(cmd_id: str, pid: int, start_marker: float | Non
             "start_marker": start_marker,
             "job_name": job_name,
             "seq": seq,
+            "stage": stage,
+            "workspace_path": workspace_path,
+            "cancel_requested": bool(cancel_requested),
             "saved_at": utc_iso_now(),
         }
         tmp = ACTIVE_COMMAND_FILE.with_suffix(".tmp")
@@ -1651,23 +1939,49 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         _clear_active_command_marker()
         return
 
-    if pid > 0 and is_tracked_process_alive(pid, marker):
+    if pid > 0 and marker is not None and _marker_matches(pid, marker):
+        recovered = _RecoveredProcessHandle(pid, marker)
+        with _lock:
+            global _active_command_id
+            _active_command_id = cmd_id
+            _runtime_info["active_command_id"] = cmd_id
+            _runtime_info["last_command_id"] = cmd_id
+            _runtime_info["last_command_status"] = "running"
+        try:
+            api.busy = f"بازیابی اجرای باقی‌مانده ({cmd_id})"
+        except Exception: pass
+        old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+        register_execution(cmd_id, old_row.get("title") or info.get("job_name") or "اجرای بازیابی‌شده",
+                           old_row.get("source") or "فرمان مدیریتی", old_row.get("execution_mode") or "foreground",
+                           command_id=cmd_id, status="running", stage="recovery_required", pid=pid,
+                           parent_pid=old_row.get("parent_pid"), process_start_marker=marker,
+                           owned_processes=old_row.get("owned_processes") or [{"pid": pid, "parent_pid": old_row.get("parent_pid"), "start_marker": marker}],
+                           workspace_path=info.get("workspace_path", ""), last_message="بازیابی اجرای باقی‌مانده پس از Restart")
+        with _execution_lock: _process_handles[cmd_id] = recovered
+        if info.get("cancel_requested") or old_row.get("cancel_requested_at"):
+            request_execution_stop(cmd_id, old_row.get("cancel_reason") or "درخواست توقف پیش از Restart")
+        threading.Thread(target=_monitor_recovered_command, args=(api, cfg, info, recovered), daemon=True,
+                         name=f"recovery-{cmd_id[:20]}").start()
         return
 
     base_url = cfg["base_url"]
     agent_key = cfg["agent_key"]
-    msg = "فرآیند اجرای فرمان پس از راه‌اندازی مجدد Windows Agent زنده نبود (توقف غیرمنتظره)."
+    previous = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+    was_cancelled = bool(info.get("cancel_requested") or previous.get("cancel_requested_at"))
+    final_status = "cancelled" if was_cancelled else "failed"
+    msg = ("فرمان در مرحله آماده‌سازی/توقف پیش از اجرای Process و پس از Restart reconcile شد."
+           if was_cancelled else "فرآیند اجرای فرمان پس از راه‌اندازی مجدد Windows Agent زنده نبود؛ نتیجه اجرا نامعلوم است.")
     _http_json(
         "POST",
         f"{base_url}/commands/{cmd_id}/events",
         agent_key,
         {
             "seq": seq,
-            "stage": "crash_recovery",
-            "level": "fatal",
+            "stage": "cancelled" if was_cancelled else "crash_recovery",
+            "level": "warning" if was_cancelled else "fatal",
             "message": msg,
             "occurredAt": utc_iso_now(),
-            "data": {"pid": pid, "autoStop": True},
+            "data": {"commandId": cmd_id, "pid": pid or None, "reason": msg, "remainingPids": [], "autoStop": True},
         },
         timeout=HTTP_TIMEOUT,
     )
@@ -1676,16 +1990,92 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         f"{base_url}/commands/{cmd_id}",
         agent_key,
         {
-            "status": "failed",
+            "status": final_status,
             "seq": seq + 1,
-            "stage": "crash_recovery",
+            "stage": "cancelled" if was_cancelled else "crash_recovery",
             "message": msg,
-            "error": msg,
-            "result": {"recoveredAfterRestart": True, "pid": pid},
+            "error": None if was_cancelled else msg,
+            "result": {"recoveredAfterRestart": True, "pid": pid or None, "terminationVerified": True, "remainingPids": []},
         },
         timeout=HTTP_TIMEOUT,
     )
     _clear_active_command_marker()
+    update_execution(cmd_id, status=final_status, stage="cancelled" if was_cancelled else "crash_recovery",
+                     last_message=msg, remaining_pids=[])
+    workspace = Path(str(info.get("workspace_path") or ""))
+    try:
+        workspace_resolved = workspace.resolve()
+        if workspace_resolved.parent == WORKSPACES_DIR.resolve() and workspace_resolved.is_dir():
+            shutil.rmtree(workspace_resolved, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _monitor_recovered_command(api, cfg: dict, marker_info: dict, proc: _RecoveredProcessHandle) -> None:
+    cmd_id = str(marker_info.get("command_id") or "").strip()
+    base = cfg["base_url"]; key = cfg["agent_key"]
+    seq = max(2, int(marker_info.get("seq") or 1) + 1)
+    cancel_reason = "درخواست توقف سایت مدیریت"
+    cancel_requested = bool(marker_info.get("cancel_requested"))
+    requested_at = time.monotonic() if cancel_requested else None
+    stop_failure_reported = False
+    while True:
+        root_alive = _marker_matches(proc.pid, proc.marker)
+        row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+        owned = list(row.get("owned_processes") or [])
+        if root_alive:
+            owned = [{"pid": proc.pid, "parent_pid": row.get("parent_pid"), "start_marker": proc.marker}] + [
+                x for x in _owned_descendants(proc.pid) if x.get("start_marker") is not None]
+            update_execution(cmd_id, owned_processes=owned, child_pids=[int(x["pid"]) for x in owned if int(x["pid"]) != proc.pid])
+        alive = [x for x in owned if x.get("start_marker") is not None and _marker_matches(int(x["pid"]), x.get("start_marker"))]
+        if not cancel_requested and time.monotonic() >= getattr(_monitor_recovered_command, "next_poll", 0.0):
+            _monitor_recovered_command.next_poll = time.monotonic() + 1.0
+            ok, _, data = _http_json("GET", f"{base}/commands/{cmd_id}", key, None, timeout=0.6)
+            if ok and isinstance(data, dict) and data.get("cancelRequested"):
+                cancel_requested = True
+                cancel_reason = str(data.get("cancelReason") or "درخواست توقف سایت مدیریت")
+                requested_at = time.monotonic()
+                request_execution_stop(cmd_id, cancel_reason)
+        if row.get("status") == "stopping" and not cancel_requested:
+            cancel_requested = True
+            cancel_reason = str(row.get("cancel_reason") or "توقف از مرکز اجرای زنده")
+            requested_at = time.monotonic()
+        if cancel_requested and alive:
+            _terminate_execution_tree(cmd_id, proc, 1.5)
+        if not alive:
+            final_status = "cancelled" if cancel_requested else "failed"
+            message = ("Processهای اجرای باقی‌مانده پس از Restart متوقف و تأیید شدند." if cancel_requested else
+                       "فرآیند پس از Restart دیگر فعال نبود؛ نتیجه اجرای کامل نامعلوم است و فرمان به‌عنوان ناموفق reconcile شد.")
+            _http_json("POST", f"{base}/commands/{cmd_id}/events", key,
+                       {"seq": seq, "stage": "termination_verified" if cancel_requested else "crash_recovery",
+                        "level": "warning" if cancel_requested else "fatal", "message": message,
+                        "occurredAt": utc_iso_now(), "data": {"commandId": cmd_id, "pid": proc.pid,
+                        "childPids": [int(x["pid"]) for x in owned if int(x["pid"]) != proc.pid],
+                        "reason": cancel_reason if cancel_requested else message, "remainingPids": [], "recoveredAfterRestart": True}}, timeout=HTTP_TIMEOUT)
+            _http_json("POST", f"{base}/commands/{cmd_id}", key,
+                       {"status": final_status, "seq": seq + 1, "stage": "cancelled" if cancel_requested else "crash_recovery",
+                        "message": message, "error": None if cancel_requested else message,
+                        "result": {"recoveredAfterRestart": True, "pid": proc.pid, "terminationVerified": True}}, timeout=HTTP_TIMEOUT)
+            update_execution(cmd_id, status=final_status, stage=final_status, last_message=message, remaining_pids=[])
+            _clear_active_command_marker()
+            with _execution_lock: _process_handles.pop(cmd_id, None)
+            with _lock:
+                global _active_command_id
+                _active_command_id = None; _runtime_info["active_command_id"] = None
+            try:
+                if getattr(api, "busy", None) == f"بازیابی اجرای باقی‌مانده ({cmd_id})": api.busy = None
+            except Exception: pass
+            return
+        if cancel_requested and requested_at is not None and time.monotonic() - requested_at > 3.0 and not stop_failure_reported:
+            pids = [int(x["pid"]) for x in alive]
+            msg = f"توقف ناموفق؛ بررسی دستی لازم است. PIDهای باقی‌مانده: {pids}"
+            _http_json("POST", f"{base}/commands/{cmd_id}", key,
+                       {"status": "failed", "seq": seq + 1, "stage": "termination_failed", "message": msg,
+                        "error": msg, "result": {"recoveredAfterRestart": True, "remainingPids": pids}}, timeout=HTTP_TIMEOUT)
+            update_execution(cmd_id, status="termination_failed", stage="termination_failed", remaining_pids=pids,
+                             error_summary=msg, last_message=msg)
+            stop_failure_reported = True
+        time.sleep(0.25)
 
 
 class _CommandSession:
@@ -1704,13 +2094,26 @@ class _CommandSession:
         self.auto_stop_on_anomaly = bool(cmd.get("autoStopOnAnomaly", True))
         self.requires_confirmation = bool(cmd.get("requiresConfirmation", True))
         self.seq = 1
+        self.job_name = ""
+        self.pid: int | None = None
+        self.process_start_marker: float | None = None
+        self.workspace_path = ""
         self.cancel_requested = False
         self.cancel_reason = ""
+        self.cancel_event = threading.Event()
+        with _execution_lock:
+            _command_cancel_events[self.cmd_id] = self.cancel_event
+        source_map = {"run_automation": "اتوماسیون", "run_arena_prompt": "Arena", "sync_and_run_job": "فرمان مدیریتی"}
+        mode = "automatic" if bool((getattr(api, "settings", None) or {}).get("auto", False)) else "manual"
+        register_execution(self.cmd_id, str(cmd.get("title") or self.cmd_type), source_map.get(self.cmd_type, "فرمان مدیریتی"),
+                           mode, command_id=self.cmd_id, status="preparing", stage="claimed", last_message="فرمان دریافت شد.")
         self.emitted_stages: set[str] = set()
         self.last_progress_mono = time.monotonic()
         self.network_paused = False
         self.network_pause_started: float | None = None
         self.last_network_probe = 0.0
+        self._next_remote_poll = 0.0
+        self._registry_stage = "claimed"
 
     def next_seq(self) -> int:
         self.seq = min(999_999, self.seq + 1)
@@ -1731,6 +2134,7 @@ class _CommandSession:
         seq = self.next_seq()
         self.emitted_stages.add(stage)
         self.mark_progress()
+        update_execution(self.cmd_id, stage=stage, last_message=redact_sensitive(message, 240))
         clean_msg = redact_sensitive(message, 1900)
         safe_data = data if isinstance(data, dict) else {}
 
@@ -1755,7 +2159,7 @@ class _CommandSession:
         if take_shot or stage in OBSERVABLE_SCREENSHOT_STAGES:
             self.capture_stage_screenshot(stage)
 
-        self.poll_control()
+        self.checkpoint(stage)
         return ok
 
     def update_state(
@@ -1769,6 +2173,12 @@ class _CommandSession:
         """به‌روزرسانی وضعیت فرمان در ``POST /commands/{id}``."""
         seq = self.next_seq()
         self.emitted_stages.add(stage)
+        ui_status = "termination_failed" if stage == "termination_failed" else {
+            "waiting_confirmation": "waiting_confirmation", "running": "running", "cancelled": "cancelled",
+            "succeeded": "succeeded", "failed": "failed", "timed_out": "timed_out", "rejected": "rejected",
+        }.get(status, "preparing")
+        update_execution(self.cmd_id, status=ui_status, stage=stage, last_message=redact_sensitive(message, 240),
+                         error_summary=redact_sensitive(error or "", 400))
         body: dict = {
             "status": status,
             "seq": seq,
@@ -1787,8 +2197,39 @@ class _CommandSession:
             timeout=HTTP_TIMEOUT,
         )
 
+    def checkpoint(self, stage: str = "preparing") -> bool:
+        if self.cancel_event.is_set() or _local_cancel_event.is_set() or _stop_event.is_set():
+            self.cancel_requested = True
+            if not self.cancel_reason:
+                with _lock:
+                    self.cancel_reason = _local_cancel_reason or "لغو محلی توسط کاربر ویندوز"
+            update_execution(self.cmd_id, status="stopping", stage=stage, cancel_reason=self.cancel_reason,
+                             last_message="درخواست توقف ثبت شد.")
+            _save_active_command_marker(self.cmd_id, self.pid, self.process_start_marker, self.job_name, self.seq,
+                                        stage=stage, workspace_path=self.workspace_path, cancel_requested=True)
+            return False
+        now = time.monotonic()
+        if now >= self._next_remote_poll:
+            self._next_remote_poll = now + 0.5
+            if self.poll_control():
+                update_execution(self.cmd_id, status="stopping", stage=stage, cancel_reason=self.cancel_reason,
+                                 last_message="درخواست توقف ثبت شد.")
+                _save_active_command_marker(self.cmd_id, self.pid, self.process_start_marker, self.job_name, self.seq,
+                                            stage=stage, workspace_path=self.workspace_path, cancel_requested=True)
+                return False
+        if stage != self._registry_stage:
+            self._registry_stage = stage
+            update_execution(self.cmd_id, stage=stage)
+            _save_active_command_marker(self.cmd_id, self.pid, self.process_start_marker, self.job_name, self.seq,
+                                        stage=stage, workspace_path=self.workspace_path, cancel_requested=self.cancel_requested)
+        return True
+
     def poll_control(self) -> bool:
         """بررسی لغو محلی بی‌درنگ، سپس دریافت کنترل از سرور با timeout کوتاه."""
+        if self.cancel_event.is_set():
+            self.cancel_requested = True
+            self.cancel_reason = self.cancel_reason or "توقف از مرکز اجرای زنده"
+            return True
         if _local_cancel_event.is_set():
             with _lock:
                 self.cancel_reason = _local_cancel_reason or "لغو محلی توسط کاربر ویندوز"
@@ -1814,6 +2255,37 @@ class _CommandSession:
             if "autoStopOnAnomaly" in data:
                 self.auto_stop_on_anomaly = bool(data.get("autoStopOnAnomaly"))
         return self.cancel_requested
+
+    def finalize_cancelled(self, reason: str, result: dict | None = None, termination_ok: bool = True,
+                           remaining_pids: list[int] | None = None, duration_seconds: float = 0.0) -> tuple[bool, int, dict]:
+        reason = redact_sensitive(reason or "درخواست توقف دریافت شد.", 500)
+        remaining = [int(pid) for pid in (remaining_pids or [])]
+        base = result or {}
+        self.emit_event("cancel_received", reason, level="warning", data={"commandId": self.cmd_id, "requestedAt": utc_iso_now(), **base})
+        self.emit_event("termination_started", "در حال توقف Processهای متعلق به فرمان.", level="warning",
+                        data={"commandId": self.cmd_id, "pid": base.get("pid"), "childPids": base.get("childPids", [])})
+        add_execution_event(self.cmd_id, "cancel_received", reason=reason, requestedAt=utc_iso_now())
+        add_execution_event(self.cmd_id, "termination_started", pid=base.get("pid"), reason=reason)
+        if termination_ok and not remaining:
+            self.emit_event("termination_verified", "پایان تمام Processهای متعلق تأیید شد.", level="info",
+                            data={"commandId": self.cmd_id, "pid": base.get("pid"), "childPids": base.get("childPids", []),
+                                  "reason": reason, "durationSeconds": round(duration_seconds, 3), "remainingPids": []})
+            add_execution_event(self.cmd_id, "termination_verified", pid=base.get("pid"), childPids=base.get("childPids", []),
+                                reason=reason, durationSeconds=round(duration_seconds, 3), remainingPids=[])
+            update_execution(self.cmd_id, status="cancelled", stage="cancelled", last_message="متوقف شد",
+                             remaining_pids=[], cancel_reason=reason, exit_code=base.get("exitCode"))
+            return self.update_state("cancelled", "cancelled", reason, error=reason,
+                                     result={**base, "terminationVerified": True, "remainingPids": []})
+        self.emit_event("termination_failed", "توقف کامل انجام نشد؛ بررسی دستی لازم است.", level="fatal",
+                        data={"commandId": self.cmd_id, "reason": reason, "remainingPids": remaining,
+                              "requestedAt": utc_iso_now(), "durationSeconds": round(duration_seconds, 3)})
+        add_execution_event(self.cmd_id, "termination_failed", reason=reason, remainingPids=remaining,
+                            durationSeconds=round(duration_seconds, 3))
+        msg = f"توقف کامل انجام نشد؛ PIDهای زیر همچنان فعال‌اند: {remaining}"
+        update_execution(self.cmd_id, status="termination_failed", stage="termination_failed", last_message=msg,
+                         remaining_pids=remaining, cancel_reason=reason, error_summary=msg)
+        return self.update_state("failed", "termination_failed", msg, error=msg,
+                                 result={**base, "terminationVerified": False, "remainingPids": remaining})
 
     def capture_stage_screenshot(self, stage: str) -> Path | None:
         """گرفتن اسکرین‌شات، ذخیره فقط در Google Drive (یا پوشه اسکرین‌شات) و ارسال فراداده بدون بایت به D1."""
@@ -1943,6 +2415,22 @@ def _ask_local_confirmation(session: _CommandSession, job_name: str) -> str:
     return "approved" if decision_win["approved"] else "rejected"
 
 
+def _interruptible_call(session: _CommandSession, function, timeout: float, stage: str) -> tuple[str, object, str]:
+    done = threading.Event(); box: dict = {}
+    def target():
+        try: box["value"] = function()
+        except BaseException as exc: box["error"] = exc
+        finally: done.set()
+    threading.Thread(target=target, daemon=True, name=f"cmd-stage-{session.cmd_id[:20]}").start()
+    deadline = time.monotonic() + max(0.1, timeout)
+    while not done.wait(0.1):
+        if not session.checkpoint(stage): return "cancelled", None, session.cancel_reason or "درخواست توقف دریافت شد."
+        if time.monotonic() >= deadline: return "timeout", None, f"مرحله {stage} پس از {timeout:g} ثانیه پایان نیافت."
+    if not session.checkpoint(stage): return "cancelled", None, session.cancel_reason or "درخواست توقف دریافت شد."
+    if "error" in box: return "error", None, f"{type(box['error']).__name__}: {redact_sensitive(str(box['error']), 400)}"
+    return "ok", box.get("value"), ""
+
+
 def _fetch_and_prepare_d1_automation(
     api,
     session: _CommandSession,
@@ -1969,18 +2457,25 @@ def _fetch_and_prepare_d1_automation(
     if job_name == "job_arena.py":
         session.emitted_stages.add("repository_sync_started")
 
-    if session.cancel_requested:
-        return "cancelled", None, None, "لغو توسط سایت مدیریت"
-
-    # ساخت آدرس کامل از روی sourceEndpoint نسبی تاییدشده
+    if not session.checkpoint("d1_source_fetch_started"):
+        return "cancelled", None, None, session.cancel_reason
     rel_after_agent = endpoint[len("/api/agent"):]
     fetch_url = f"{session.base_url}{rel_after_agent}"
-
-    ok, code, data = _http_json("GET", fetch_url, session.agent_key, None, timeout=HTTP_TIMEOUT)
+    fetch_state, fetched, fetch_error = _interruptible_call(
+        session, lambda: _http_json("GET", fetch_url, session.agent_key, None, timeout=HTTP_TIMEOUT),
+        HTTP_TIMEOUT + 0.5, "d1_source_fetch_started")
+    if fetch_state == "cancelled": return "cancelled", None, None, fetch_error
+    if fetch_state != "ok" or not isinstance(fetched, tuple):
+        return "failed", None, None, fetch_error or "دریافت D1 ناموفق بود."
+    ok, code, data = fetched
+    if not session.checkpoint("d1_source_fetch_finished"):
+        return "cancelled", None, None, session.cancel_reason
     if not ok:
-        err_msg = _extract_error_message(data, code)
+        err_msg = _extract_error_message(data if isinstance(data, dict) else {}, code)
         return "failed", None, None, f"دریافت کد اتوماسیون از D1 ناموفق بود ({err_msg})."
 
+    if not session.checkpoint("d1_source_fetched"):
+        return "cancelled", None, None, session.cancel_reason
     resp_auto_id = str(data.get("automationId") or "").strip()
     resp_ver_id = str(data.get("versionId") or "").strip()
     resp_ver_num = data.get("version")
@@ -2005,7 +2500,11 @@ def _fetch_and_prepare_d1_automation(
     if not isinstance(source_code, str) or not source_code.strip():
         return "rejected", None, None, "متن کد Python برگشتی از D1 خالی یا نامعتبر است."
 
+    if not session.checkpoint("sha256_check_started"):
+        return "cancelled", None, None, session.cancel_reason
     actual_sha256 = hashlib.sha256(source_code.encode("utf-8")).hexdigest().lower()
+    if not session.checkpoint("sha256_check_finished"):
+        return "cancelled", None, None, session.cancel_reason
     if resp_sha256 != expected_sha256 or actual_sha256 != expected_sha256:
         return (
             "rejected",
@@ -2014,28 +2513,58 @@ def _fetch_and_prepare_d1_automation(
             f"عدم تطابق SHA-256 کد اتوماسیون (انتظار: {expected_sha256[:12]}…، محاسبه‌شده: {actual_sha256[:12]}…).",
         )
 
-    workspace_dir = _create_command_workspace(session.cmd_id)
+    if not session.checkpoint("workspace_create_started"):
+        return "cancelled", None, None, session.cancel_reason
+    try:
+        workspace_dir = _create_command_workspace(session.cmd_id)
+    except Exception as exc:
+        return "failed", None, None, f"ساخت workspace ناموفق بود: {type(exc).__name__}"
+    session.workspace_path = str(workspace_dir)
+    update_execution(session.cmd_id, workspace_path=session.workspace_path)
+    _save_active_command_marker(session.cmd_id, None, None, job_name, session.seq, stage="preparing", workspace_path=str(workspace_dir))
+    if not session.checkpoint("workspace_create_finished"):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "cancelled", None, None, session.cancel_reason
     script_path = (workspace_dir / job_name).resolve()
     if script_path.parent != workspace_dir.resolve():
         shutil.rmtree(workspace_dir, ignore_errors=True)
         return "rejected", None, None, "مسیر فایل در فضای کاری موقت معتبر نیست."
 
     script_bytes = source_code.encode("utf-8")
-    script_path.write_bytes(script_bytes)
-
-    # به‌روزرسانی کپی نمایشی در Desktop\CODES برای دیده‌شدن در کتابخانه کدها (بدون هیچ فایل کنار app.py)
+    if not session.checkpoint("workspace_write_started"):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "cancelled", None, None, session.cancel_reason
+    try:
+        script_path.write_bytes(script_bytes)
+    except OSError as exc:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "failed", None, None, f"نوشتن فایل workspace ناموفق بود: {type(exc).__name__}"
+    if not session.checkpoint("workspace_write_finished"):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "cancelled", None, None, session.cancel_reason
+    if not session.checkpoint("mirror_started"):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "cancelled", None, None, session.cancel_reason
     try:
         codes_dir = _get_codes_dir().resolve()
         mirror_path = (codes_dir / job_name).resolve()
         if mirror_path.parent == codes_dir:
             mirror_path.write_bytes(script_bytes)
-            if api is not None:
-                try:
-                    api._scan_codes()
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    except Exception as exc:
+        session.emit_event("mirror_warning", f"کپی نمایشی CODES انجام نشد: {type(exc).__name__}", level="warning")
+    if not session.checkpoint("mirror_finished"):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "cancelled", None, None, session.cancel_reason
+    if api is not None:
+        scan_state, _scan_value, scan_error = _interruptible_call(session, api._scan_codes, 4.0, "codes_scan")
+        if scan_state == "cancelled":
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+            return "cancelled", None, None, scan_error
+        if scan_state == "timeout":
+            session.emit_event("codes_scan_warning", scan_error, level="warning")
+        if not session.checkpoint("codes_scan_finished"):
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+            return "cancelled", None, None, session.cancel_reason
 
     session.emit_event(
         "d1_source_verified",
@@ -2052,7 +2581,9 @@ def _fetch_and_prepare_d1_automation(
     )
     if job_name == "job_arena.py":
         session.emitted_stages.add("repository_sync_finished")
-
+    if not session.checkpoint("pre_spawn"):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return "cancelled", None, None, session.cancel_reason
     return "ok", script_path, workspace_dir, ""
 
 
@@ -2063,8 +2594,8 @@ def _sync_collab_repository(api, session: _CommandSession, job_name: str) -> tup
         f"شروع دریافت آخرین نسخه‌ی مخزن ایجنت همکار برای {job_name}…",
         level="info",
     )
-    if session.cancel_requested:
-        return False, None, "لغو توسط سایت مدیریت"
+    if not session.checkpoint("repository_sync_started"):
+        return False, None, session.cancel_reason or "لغو توسط کاربر"
 
     codes_dir = _get_codes_dir()
     target_path = (codes_dir / job_name).resolve()
@@ -2080,19 +2611,22 @@ def _sync_collab_repository(api, session: _CommandSession, job_name: str) -> tup
             except Exception:
                 pass
 
-        zip_bytes = _app.repo_zip(owner, repo, branch)
+        fetch_state, zip_bytes, fetch_error = _interruptible_call(session, lambda: _app.repo_zip(owner, repo, branch), 30.0, "repository_fetch")
+        if fetch_state == "cancelled": return False, None, fetch_error
+        if fetch_state == "timeout": return False, None, fetch_error
+        if not session.checkpoint("repository_fetch_finished"): return False, None, session.cancel_reason
         if zip_bytes:
             py_files = _app.extract_py_files(zip_bytes)
             for name, content in py_files.items():
+                if not session.checkpoint("repository_mirror"): return False, None, session.cancel_reason
                 if JOB_NAME_RE.match(name):
                     dest = (codes_dir / name).resolve()
-                    if dest.parent == codes_dir.resolve():
-                        dest.write_bytes(content)
+                    if dest.parent == codes_dir.resolve(): dest.write_bytes(content)
             if api is not None:
-                try:
-                    api._scan_codes()
-                except Exception:
-                    pass
+                scan_state, _scan_value, scan_error = _interruptible_call(session, api._scan_codes, 4.0, "codes_scan")
+                if scan_state == "cancelled": return False, None, scan_error
+                if scan_state == "timeout": session.emit_event("codes_scan_warning", scan_error, level="warning")
+            if not session.checkpoint("repository_mirror_finished"): return False, None, session.cancel_reason
         elif not target_path.exists():
             return False, None, f"دریافت مخزن همکار ({owner}/{repo}) ممکن نشد و فایل {job_name} در CODES نیست."
     except Exception as exc:
@@ -2246,6 +2780,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
 
     cmd_workspace: Path | None = None
     try:
+        _save_active_command_marker(cmd_id, None, None, "", session.seq, stage="preparing")
         # ۱. بررسی امنیتی allowlist، ساختار payload و مسیر
         codes_dir = _get_codes_dir()
         sec_ok, job_name, job_path, reject_reason = validate_command_security(cmd, codes_dir)
@@ -2262,6 +2797,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 _runtime_info["last_command_status"] = "rejected"
             return "rejected"
 
+        session.job_name = job_name
         auto_mode = False
         if api is not None:
             try:
@@ -2276,9 +2812,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             data={"commandType": session.cmd_type, "jobName": job_name, "autoMode": auto_mode},
         )
         if session.cancel_requested:
-            session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان پیش از شروع لغو شد.")
-            with _lock:
-                _runtime_info["last_command_status"] = "cancelled"
+            session.finalize_cancelled(session.cancel_reason or "فرمان پیش از شروع لغو شد.")
+            with _lock: _runtime_info["last_command_status"] = "cancelled"
             return "cancelled"
 
         # ۲. رعایت حالت دستی/خودکار محلی Windows Agent
@@ -2295,9 +2830,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             )
             decision = _ask_local_confirmation(session, job_name)
             if decision == "cancelled":
-                session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان در زمان انتظار تأیید لغو شد.")
-                with _lock:
-                    _runtime_info["last_command_status"] = "cancelled"
+                session.finalize_cancelled(session.cancel_reason or "فرمان در زمان انتظار تأیید لغو شد.")
+                with _lock: _runtime_info["last_command_status"] = "cancelled"
                 return "cancelled"
             if decision != "approved":
                 msg_rej = "کاربر در پنل ویندوز اجرای این فرمان را رد کرد."
@@ -2318,9 +2852,9 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         if session.cmd_type == "run_automation":
             prep_status, synced_path, cmd_workspace, prep_err = _fetch_and_prepare_d1_automation(api, session, job_name)
             if session.cancel_requested or prep_status == "cancelled":
-                session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان حین دریافت از D1 لغو شد.")
-                with _lock:
-                    _runtime_info["last_command_status"] = "cancelled"
+                if cmd_workspace is not None: shutil.rmtree(cmd_workspace, ignore_errors=True)
+                session.finalize_cancelled(session.cancel_reason or prep_err or "فرمان حین دریافت از D1 لغو شد.")
+                with _lock: _runtime_info["last_command_status"] = "cancelled"
                 return "cancelled"
             if prep_status == "rejected":
                 session.emit_event("d1_hash_verification", prep_err, level="fatal", data={"autoStop": True})
@@ -2345,9 +2879,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         else:
             sync_ok, synced_path, sync_err = _sync_collab_repository(api, session, job_name)
             if session.cancel_requested:
-                session.update_state("cancelled", "cancelled", session.cancel_reason or "فرمان حین همگام‌سازی لغو شد.")
-                with _lock:
-                    _runtime_info["last_command_status"] = "cancelled"
+                session.finalize_cancelled(session.cancel_reason or sync_err or "فرمان حین همگام‌سازی لغو شد.")
+                with _lock: _runtime_info["last_command_status"] = "cancelled"
                 return "cancelled"
             if not sync_ok or synced_path is None:
                 session.emit_event("repository_sync_finished", sync_err, level="fatal", data={"autoStop": True})
@@ -2360,7 +2893,24 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         arena_ocr_enabled = (job_name == "job_arena.py")
         arena_env: dict[str, str] = {}
         if arena_ocr_enabled:
-            ok_ocr, ocr_info, ocr_error = verify_vision_preflight(timeout=15.0)
+            if not session.checkpoint("ocr_preflight_started"):
+                session.finalize_cancelled(session.cancel_reason or "لغو پیش از OCR preflight")
+                return "cancelled"
+            ocr_state, ocr_result, ocr_error = _interruptible_call(
+                session, lambda: verify_vision_preflight(timeout=15.0, cancel_check=session.checkpoint),
+                17.0, "ocr_preflight")
+            if ocr_state == "cancelled":
+                session.finalize_cancelled(ocr_error or session.cancel_reason or "لغو هنگام OCR preflight")
+                return "cancelled"
+            if ocr_state == "timeout":
+                ok_ocr, ocr_info = False, {}
+            elif ocr_state == "ok" and isinstance(ocr_result, tuple):
+                ok_ocr, ocr_info, ocr_error = ocr_result
+            else:
+                ok_ocr, ocr_info = False, {}
+            if not session.checkpoint("ocr_preflight_finished"):
+                session.finalize_cancelled(session.cancel_reason or "لغو پس از OCR preflight")
+                return "cancelled"
             if not ok_ocr:
                 session.emit_event(
                     "ocr_preflight_failed",
@@ -2392,13 +2942,33 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 data={"engine": "paddleocr", "localOnly": True},
             )
 
-        # ۵. شروع فرآیند در Process Group مستقل
+        # ۵. شروع فرآیند در Process Group مستقل؛ آخرین checkpoint درست پیش از spawn
+        if not session.checkpoint("pre_spawn"):
+            session.finalize_cancelled(session.cancel_reason or "لغو پیش از spawn")
+            return "cancelled"
         proc = spawn_job_process(synced_path, run_cwd, extra_env=arena_env)
         pid = int(proc.pid)
         start_marker = _get_process_start_marker(pid)
+        session.pid = pid
+        session.process_start_marker = start_marker
         started_mono = time.monotonic()
-        _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq)
+        with _execution_lock:
+            _process_handles[cmd_id] = proc
+        update_execution(cmd_id, status="running", stage="process_started", pid=pid, parent_pid=os.getpid(),
+                         process_start_marker=start_marker,
+                         owned_processes=[{"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}],
+                         last_message=f"Process شروع شد؛ PID {pid}")
+        _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq, stage="running",
+                                    workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested)
 
+        if not session.checkpoint("process_started"):
+            stop_result = _terminate_execution_tree(cmd_id, proc, 2.0)
+            session.finalize_cancelled(session.cancel_reason or "لغو پس از spawn",
+                                      {"pid": pid, "childPids": stop_result.get("child_pids", []), "exitCode": proc.poll()},
+                                      termination_ok=bool(stop_result.get("ok")),
+                                      remaining_pids=stop_result.get("remaining", []),
+                                      duration_seconds=stop_result.get("duration", 0.0))
+            return "cancelled"
         session.update_state(
             "running",
             "process_started",
@@ -2430,6 +3000,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         stdout_lines: list[str] = []
         eof_reached = False
         last_control_poll = time.monotonic()
+        last_tree_snapshot = 0.0
+        termination_result = None
         fatal_anomaly_reason: str | None = None
         timed_out_reason: str | None = None
         is_arena_job = (session.cmd_type == "run_arena_prompt") or (job_name == "job_arena.py")
@@ -2468,7 +3040,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                     break
 
             if fatal_anomaly_reason and session.auto_stop_on_anomaly:
-                terminate_tree(proc, start_marker)
+                termination_result = _terminate_execution_tree(cmd_id, proc, 2.0)
                 session.emit_event(
                     "fatal_anomaly",
                     fatal_anomaly_reason,
@@ -2481,6 +3053,19 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             now_mono = time.monotonic()
             elapsed = now_mono - started_mono
             idle_secs = now_mono - session.last_progress_mono
+            if now_mono - last_tree_snapshot >= 0.5:
+                last_tree_snapshot = now_mono
+                old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+                owned_by_pid = {int(item["pid"]): item for item in (old_row.get("owned_processes") or []) if isinstance(item, dict) and item.get("pid")}
+                if _marker_matches(pid, start_marker):
+                    owned_by_pid[pid] = {"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}
+                    owned_by_pid.update({int(item["pid"]): item for item in _owned_descendants(pid) if item.get("start_marker") is not None})
+                owned = [item for item in owned_by_pid.values() if item.get("start_marker") is not None and _marker_matches(int(item["pid"]), item.get("start_marker"))]
+                children = [int(item["pid"]) for item in owned if int(item["pid"]) != pid]
+                update_execution(cmd_id, child_pids=children, owned_processes=owned, stage="running",
+                                 pid=pid, parent_pid=os.getpid(), process_start_marker=start_marker)
+                _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq, stage="running",
+                                            workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested)
 
             # پایش سبک مستقل Manager؛ job_arena.py خودش URL Arena را جداگانه می‌سنجد.
             if now_mono - session.last_network_probe >= 5.0:
@@ -2509,7 +3094,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
 
             if elapsed > session.timeout_seconds:
                 timed_out_reason = f"زمان اجرای فرمان از سقف مجاز ({int(session.timeout_seconds)} ثانیه) گذشت."
-                terminate_tree(proc, start_marker)
+                termination_result = _terminate_execution_tree(cmd_id, proc, 2.0)
                 session.emit_event(
                     "timeout",
                     timed_out_reason,
@@ -2521,7 +3106,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
 
             if not session.network_paused and idle_secs > session.no_progress_seconds:
                 timed_out_reason = f"به مدت {int(session.no_progress_seconds)} ثانیه هیچ پیشرفتی از فرآیند ثبت نشد."
-                terminate_tree(proc, start_marker)
+                termination_result = _terminate_execution_tree(cmd_id, proc, 2.0)
                 session.emit_event(
                     "no_progress",
                     timed_out_reason,
@@ -2543,17 +3128,19 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 session.cancel_reason = local_reason
 
             if session.cancel_requested or _stop_event.is_set():
-                if _local_cancel_event.is_set():
-                    with _lock:
-                        requested_at = _local_cancel_requested_at or time.monotonic()
-                    remaining = max(0.1, 2.0 - (time.monotonic() - requested_at))
-                    terminate_tree(proc, start_marker, timeout_seconds=remaining)
-                else:
-                    terminate_tree(proc, start_marker)
+                requested_at = time.monotonic()
+                with _lock:
+                    if _local_cancel_event.is_set(): requested_at = _local_cancel_requested_at or requested_at
+                remaining_time = max(0.1, 2.0 - (time.monotonic() - requested_at))
+                termination_result = _terminate_execution_tree(cmd_id, proc, remaining_time)
                 break
 
             if proc.poll() is not None and eof_reached and out_queue.empty():
-                break
+                owned_alive = [p for p in _execution_alive_pids(cmd_id) if p != pid]
+                if not owned_alive:
+                    break
+                update_execution(cmd_id, status="monitoring", stage="monitoring", child_pids=owned_alive,
+                                 last_message="پایش Processهای فرزند که پس از parent باقی مانده‌اند.")
 
             time.sleep(0.1)
 
@@ -2592,11 +3179,25 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         # ۶. تعیین وضعیت نهایی و ثبت در D1
         if session.cancel_requested or _stop_event.is_set():
             reason = session.cancel_reason or "توسط کاربر یا سایت مدیریت متوقف شد."
-            session.emit_event("cancelled", f"فرآیند متوقف شد: {reason}", level="warning", take_shot=True)
-            session.update_state("cancelled", "cancelled", reason, error=reason, result=result_meta)
-            with _lock:
-                _runtime_info["last_command_status"] = "cancelled"
-            return "cancelled"
+            if not termination_result or not termination_result.get("ok"):
+                termination_result = _terminate_execution_tree(cmd_id, proc, 1.0)
+            session.finalize_cancelled(reason,
+                {**result_meta, "pid": pid, "childPids": termination_result.get("child_pids", []), "exitCode": exit_code},
+                termination_ok=bool(termination_result.get("ok")),
+                remaining_pids=termination_result.get("remaining", []),
+                duration_seconds=termination_result.get("duration", 0.0))
+            with _lock: _runtime_info["last_command_status"] = "cancelled" if termination_result.get("ok") else "termination_failed"
+            return "cancelled" if termination_result.get("ok") else "termination_failed"
+
+        if termination_result and not termination_result.get("ok"):
+            remaining = termination_result.get("remaining", [])
+            stop_error = f"توقف کامل انجام نشد؛ PIDهای زیر همچنان فعال‌اند: {remaining}"
+            session.update_state("failed", "termination_failed", stop_error, error=stop_error,
+                                 result={**result_meta, "remainingPids": remaining, "terminationVerified": False})
+            update_execution(cmd_id, status="termination_failed", stage="termination_failed",
+                             remaining_pids=remaining, error_summary=stop_error, last_message="توقف ناموفق؛ بررسی دستی لازم است")
+            with _lock: _runtime_info["last_command_status"] = "termination_failed"
+            return "termination_failed"
 
         if timed_out_reason:
             session.update_state("timed_out", "timed_out", timed_out_reason, error=timed_out_reason, result=result_meta)
@@ -2654,7 +3255,26 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 pass
         return "succeeded"
 
+    except Exception as exc:
+        if session.cancel_requested or session.cancel_event.is_set() or _local_cancel_event.is_set():
+            reason = session.cancel_reason or "درخواست توقف هنگام آماده‌سازی دریافت شد."
+            session.finalize_cancelled(reason)
+            with _lock: _runtime_info["last_command_status"] = "cancelled"
+            return "cancelled"
+        err = redact_sensitive(f"اجرای فرمان با خطای داخلی متوقف شد: {type(exc).__name__}: {exc}", 700)
+        try:
+            session.update_state("failed", "failed", err, error=err,
+                                 result={"recovered": False, "pid": None})
+        except Exception:
+            update_execution(cmd_id, status="failed", stage="failed", last_message=err, error_summary=err)
+        with _lock:
+            _runtime_info["last_command_status"] = "failed"
+        return "failed"
+
     finally:
+        with _execution_lock:
+            _process_handles.pop(cmd_id, None)
+            _command_cancel_events.pop(cmd_id, None)
         if cmd_workspace is not None:
             shutil.rmtree(cmd_workspace, ignore_errors=True)
         _clear_active_command_marker()
@@ -2728,6 +3348,36 @@ def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
 
     final_status = execute_claimed_command(api, cfg, cmd)
     return True, final_status
+
+
+def _claim_worker(api, cfg: dict) -> None:
+    global _command_thread, _claim_in_progress
+    try:
+        ok, status = claim_and_run_once(api, cfg)
+        if status not in ("idle", "busy", "no_secret") and api is not None:
+            try: api.log(f"فرمان پس‌زمینه مدیریت پایان یافت: {status}")
+            except Exception: pass
+    except Exception as exc:
+        if api is not None:
+            try: api.log(f"خطای نخ فرمان مدیریت: {type(exc).__name__}")
+            except Exception: pass
+    finally:
+        with _command_lock:
+            _claim_in_progress = False
+            _command_thread = None
+
+
+def _start_claim_worker(api, cfg: dict) -> bool:
+    global _command_thread, _claim_in_progress
+    with _command_lock:
+        if _claim_in_progress or (_command_thread is not None and _command_thread.is_alive()): return False
+        with _lock:
+            if _active_command_id is not None: return False
+        _claim_in_progress = True
+        _command_thread = threading.Thread(target=_claim_worker, args=(api, cfg),
+                                           name="manager-command-foreground", daemon=True)
+        _command_thread.start()
+        return True
 
 
 def _worker_loop() -> None:
@@ -2823,21 +3473,8 @@ def _worker_loop() -> None:
                 backoff_idx = 0
 
         if need_claim and not _stop_event.is_set():
-            ok_c, status_c = claim_and_run_once(api, cfg)
+            _start_claim_worker(api, cfg)
             last_claim = time.monotonic()
-            if not ok_c and status_c in ("auth_401", "auth_403"):
-                auth_blocked = True
-                continue
-            if status_c == "network_error" and not probe_network_health(cfg["base_url"], cfg["agent_key"], timeout=2.0):
-                _local_cancel_event.wait(NETWORK_RECHECK_INTERVAL)
-                if _local_cancel_event.is_set():
-                    clear_local_cancel()
-                last_hb = 0.0
-                last_poll = 0.0
-                last_claim = 0.0
-                continue
-            if status_c not in ("idle", "busy", "no_secret", "network_error"):
-                last_hb = 0.0
 
         now2 = time.monotonic()
         next_hb_in = max(0.1, hb_interval - (now2 - last_hb))
