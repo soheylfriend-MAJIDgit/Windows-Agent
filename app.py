@@ -46,7 +46,7 @@ def _read_app_version() -> str:
             return raw
     except (OSError, UnicodeError):
         pass
-    return "1.7-20"
+    return "1.7-21"
 
 APP_VERSION = _read_app_version()
 
@@ -78,16 +78,11 @@ PAGE_LOAD_SECONDS = 5
 SCREENSHOT_PREFIX = "google"
 
 # ------------------------------------------------------------------
-#  مسیرهای ذخیره
-#  گوگل درایو فقط دو چیز دارد: ScreenShots و logs
+#  مسیرهای داده: گزارش‌ها و تصاویر تازه فقط محلی می‌مانند؛ Drive بازنشسته است.
 # ------------------------------------------------------------------
-DRIVE_BASE_DIR = r"C:\Users\alibatel\My Drive\Windows-Agent-DB"
-
-# اسکرین‌شات‌ها  →  ...\Windows-Agent-DB\ScreenShots
-SCREENSHOT_DIR = DRIVE_BASE_DIR + r"\ScreenShots"
-
-# گزارش‌ها و نتیجه کدها  →  ...\Windows-Agent-DB\logs
-REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
+DRIVE_BASE_DIR = ""  # legacy read-only compatibility; never a new write destination
+SCREENSHOT_DIR = ""  # resolves to %LOCALAPPDATA%\\Windows-Agent\\ScreenShots
+REPORT_DIR = ""  # resolves to %LOCALAPPDATA%\\Windows-Agent\\logs
 
 # پوشه‌ی خود برنامه — هیچ فایلی اینجا نوشته نمی‌شود
 LOCAL_BASE_DIR = Path(__file__).resolve().parent
@@ -406,33 +401,11 @@ def get_desktop_dir() -> Path:
 
 
 def resolve_dir(target_setting: str | None, fallback_subfolder: str | None = None) -> tuple[Path, bool]:
-    """پوشه مقصد را برمی‌گرداند.
-
-    خروجی: (مسیر، آیا مسیر گوگل درایو استفاده شد؟)
-
-    قانون مهم: خود پوشه‌ی `My Drive` هرگز ساخته نمی‌شود؛ فقط زیرپوشه‌های داخل
-    پوشه پروژه ساخته می‌شوند. چون اگر Google Drive اجرا نباشد، ساختن دستی
-    آن پوشه یک پوشه‌ی محلی بی‌فایده می‌سازد که هیچ‌وقت sync نمی‌شود.
-    """
-    target: Path | None = Path(target_setting) if target_setting else None
-    if target is not None and not target.is_absolute():
-        target = None  # فقط مسیرهای مطلق ویندوزی معتبرند
-
-    if target is not None:
-        if target.is_dir():
-            return target, True
-        # پوشه نیست؛ فقط اگر پوشه‌ی والدش (که گوگل درایو ساخته) موجود باشد می‌سازیم
-        if target.parent.is_dir():
-            try:
-                target.mkdir(exist_ok=True)
-                return target, True
-            except OSError:
-                pass
-
-    base = Path(FALLBACK_BASE_DIR) if FALLBACK_BASE_DIR else get_desktop_dir()
-    if fallback_subfolder:
-        base = base / fallback_subfolder
-    return base, False
+    """Resolve legacy screenshot/report requests into LocalAppData only; never writes to Drive/Desktop."""
+    name = fallback_subfolder or "data"
+    folder = STATE_DIR / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder, False
 
 
 def error_dir() -> Path:
@@ -476,17 +449,20 @@ def write_error(context: str, detail: str = "") -> Path | None:
 
 
 def drive_available() -> bool:
-    """آیا پوشه‌ی پروژه در گوگل درایو در دسترس است؟"""
-    base = Path(DRIVE_BASE_DIR)
-    return base.is_absolute() and base.is_dir()
+    """Google Drive is not a storage destination for new screenshots, reports, or artifacts."""
+    return False
 
 
 def resolve_screenshot_dir() -> tuple[Path, bool]:
-    return resolve_dir(SCREENSHOT_DIR, "ScreenShots")
+    folder = STATE_DIR / "ScreenShots"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder, False
 
 
 def resolve_report_dir() -> tuple[Path, bool]:
-    return resolve_dir(REPORT_DIR, "logs")
+    folder = STATE_DIR / "logs"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder, False
 
 
 def human_size(num_bytes: int) -> str:
@@ -1292,33 +1268,8 @@ def check_internet(timeout: float = 1.5) -> bool:
 
 
 def check_google_drive() -> tuple[bool, str]:
-    """آیا گوگل درایو (Drive for Desktop) وصل است؟"""
-    options = [Path(DRIVE_BASE_DIR)]
-    home_drive = Path.home() / "My Drive"
-    options.append(home_drive)
-
-    for path in options:
-        try:
-            if path.is_dir():
-                return True, "مسیر در دسترس است"
-        except OSError:
-            continue
-
-    if IS_WINDOWS:
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq GoogleDriveFS.exe", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=4,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if "GoogleDriveFS" in out.stdout:
-                return False, "برنامه Drive باز است ولی مسیر My Drive پیدا نشد"
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    return False, "در دسترس نیست"
+    """Legacy UI check: Drive is intentionally disabled for new controls and artifacts."""
+    return False, "ذخیره‌سازی Google Drive بازنشسته است؛ داده‌ها محلی یا از API مدیریت ارسال می‌شوند."
 
 
 
@@ -2356,7 +2307,7 @@ class Api:
         """وضعیت کلاینت ایجنت مدیریت در RAM (بدون هیچ کار شبکه‌ای)."""
         info = {
             "configured": False,
-            "base_url": "https://windows-agent-management-cloudflare.soheylfriend.workers.dev/api/agent",
+            "base_url": "https://windows-agent-management.vercel.app/api/agent",
             "key_prefix": "",
             "agent_id": "windows-agent-alibatel-main",
             "last_heartbeat_at": "",
@@ -2864,7 +2815,7 @@ class Api:
         path = take_screenshot(dest)
         self.sound("shutter")
         self.log(f"✅ اسکرین‌شات ذخیره شد → {path}")
-        self.log(f"   محل: {'گوگل درایو' if on_drive else 'دسکتاپ (درایو در دسترس نبود)'}")
+        self.log("   محل: فضای محلی Windows Agent (LocalAppData)")
         self.toast("اسکرین‌شات گرفته شد")
 
     def _job_report(self) -> None:
@@ -2873,8 +2824,7 @@ class Api:
         dest, on_drive = resolve_report_dir()
         path = save_report(format_windows_report(windows), dest)
         self.log(f"✅ گزارش ذخیره شد ({len(windows)} پنجره) → {path.name}")
-        if not on_drive:
-            self.log("   ⚠️ گوگل درایو در دسترس نبود؛ روی دسکتاپ ذخیره شد.")
+        self.log("   محل: فضای محلی Windows Agent (LocalAppData)")
         self.sound("success")
         self.toast("گزارش ذخیره شد")
 

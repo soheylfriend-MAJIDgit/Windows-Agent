@@ -1,4 +1,6 @@
-# کنترل مستقیم Google Drive (بدون Drive Desktop mirror)
+# بایگانی: کنترل مستقیم Google Drive (بدون Drive Desktop mirror)
+
+> **بازنشسته در نسخه 1.7-21:** این transport از `manager_client.start()` شروع نمی‌شود و نباید برای Screenshot، Report یا فایل کنترل جدید استفاده شود. مسیر رسمی فعلی Vercel Management API است؛ ببینید [`vercel-management-migration.md`](vercel-management-migration.md).
 
 ## چه چیزی عوض می‌شود
 

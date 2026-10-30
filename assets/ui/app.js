@@ -28,11 +28,11 @@
 
   var CHANGELOG = [
     {
-      v: '۱.۷-۲۰', d: '۱۴۰۵/۰۸/۰۸',
+      v: '۱.۷-۲۱', d: '۱۴۰۵/۰۸/۰۹',
       items: [
-        'کنترل اضطراری توقف همه از Heartbeat مستقل، با Idempotency و گزارش نتیجه‌ی تأییدشده به مدیریت.',
-        'Registry و PIDهای متعلق پس از توقف دوباره بررسی می‌شوند؛ شکست توقف با شناسه‌ها و PIDهای باقی‌مانده گزارش می‌شود.',
-        'نسخه و Commit جاری از Git HEAD یا build stamp زمان اجرای run.bat خوانده می‌شوند.'
+        'انتقال Control Plane به Vercel Management API و مهاجرت یک‌باره‌ی endpoint رمز‌شده با DPAPI.',
+        'صف پایدار Screenshot محلی، فشرده‌سازی تا سقف ۴ MiB، Upload احرازشده، retry کنترل‌شده و idempotency.',
+        'غیرفعال‌شدن نوشتن تازه‌ی Screenshot، گزارش و فایل‌های کنترل در Google Drive؛ Emergency stop حفظ شد.'
       ]
     },
     {
@@ -46,7 +46,7 @@
         'اگر گواهی امنیتی رد شود (فیلترشکن یا آنتی‌ویروس)، ارسال یک‌بار بدون بررسی گواهی تلاش می‌شود.',
         'امکان انتخاب و کپی آزادانه‌ی متن از تمام بخش‌های صفحه (از جمله داخل تب‌ها، زیرتب‌ها و دکمه‌ها).',
         'زمان‌بندی دقیق ربات تلگرام با فیلد scheduled_at (ISO 8601 با منطقه‌ی زمانی UTC و تهران) + تعریف صریح delay نسبت به لحظه ثبت + شمارش معکوس زنده و ویرایش پیام در صف.',
-        'ماژول مستقل manager_client.py با رمزنگاری ویندوز DPAPI (manager_secret.bin)، ارسال خودکار Heartbeat هر ۳۰ ثانیه و پاسخ خودکار «سلام ایجنت مدیریت.» به تست اتصال D1 هر ۵ ثانیه.'
+        'ماژول مستقل manager_client.py با رمزنگاری ویندوز DPAPI (manager_secret.bin)، ارسال خودکار Heartbeat هر ۳۰ ثانیه و پاسخ خودکار «سلام ایجنت مدیریت.» به تست اتصال API مدیریت هر ۵ ثانیه.'
       ]
     },
     {
@@ -636,6 +636,9 @@
         lt.textContent = 'هنوز تستی دریافت نشده (پاسخ خودکار: «سلام ایجنت مدیریت.»)';
       }
     }
+
+    var shotQueue = $('mgr-screenshot-upload-status');
+    if (shotQueue) shotQueue.textContent = mgr.screenshot_upload_message || 'هنوز Screenshotی در صف نیست.';
 
     var sp = $('mgr-secret-path');
     if (sp && mgr.secret_file) sp.textContent = mgr.secret_file;

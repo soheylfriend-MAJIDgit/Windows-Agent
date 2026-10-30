@@ -37,7 +37,7 @@ def state_dir() -> Path:
 
 
 def report_dir() -> Path:
-    # Match the app's configured Google Drive logs path, including its safe Desktop\\logs fallback.
+    # Match the app's per-user LocalAppData logs path; no Drive/Desktop fallback is permitted.
     repo = str(Path(__file__).resolve().parents[2])
     if repo not in sys.path:
         sys.path.insert(0, repo)

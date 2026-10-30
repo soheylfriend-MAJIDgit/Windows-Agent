@@ -2,7 +2,7 @@
 
 ابزار اتوماسیون دسکتاپ ویندوز با رابط کاربری ساده.
 
-نسخه فعلی: **۱.۷-۲۰ — کنترل اضطراری توقف همه با تأیید Registry و گزارش نتیجه به مدیریت**
+نسخه فعلی: **۱.۷-۲۱ — هماهنگی Management API با Vercel و صف امن Screenshot**
 
 ---
 
@@ -24,7 +24,7 @@
           │  Desktop\CODES     │
           └─────────┬──────────┘
                     ▼
-        اجرا → نتیجه در Google Drive\logs
+        اجرا → نتیجه محلی + گزارش به Vercel Management API
 ```
 
 ایجنت همکار به سورس برنامه دسترسی ندارد؛ فقط کد پایتون می‌نویسد.
@@ -73,9 +73,11 @@ Windows-Agent/
 > پرامپت کامل ساخت ایجنت مدیریت: [`docs/manager-agent-prompt.md`](docs/manager-agent-prompt.md)
 > (شامل آدرس دو ریپو، قواعد فایل کد، قالب فایل نتیجه و خطا، پالت رنگ و طرح صفحه‌ها)
 
-### کنترل مستقیم Google Drive برای ایجنت مدیریت
+### هماهنگی با سایت مدیریت Vercel
 
-برای کنارگذاشتن Drive Desktop mirror، راهنمای راه‌اندازی دستی OAuth، ذخیره DPAPI، کنترل `play/pause/stop`، حفاظت از replay و محدودیت‌های آزمون Windows را در [`docs/direct-drive-control.md`](docs/direct-drive-control.md) ببین. راه‌اندازی OAuth خودکار نیست؛ تا وقتی مالک آن را دستی انجام ندهد و حالت خودکار محلی و `CONTROL.txt=play` هر دو فعال نشوند، payload اجرا نمی‌شود.
+آدرس Control Plane برابر `https://windows-agent-management.vercel.app/api/agent` است. کلید فقط با DPAPI در `%LOCALAPPDATA%\\Windows-Agent\\manager_secret.bin` ذخیره می‌شود. Screenshotها از پوشه‌ی محلی اجرای همان فرمان به‌صورت multipart و از مسیر `/screenshots` ارسال می‌شوند؛ صف پایدار، retry محدود و deduplication محلی دارند. خود Agent هیچ Blob token، Database URL یا Google Drive credential دریافت نمی‌کند.
+
+تمام Screenshotها و گزارش‌های تازه محلی یا از API مدیریت ارسال می‌شوند؛ Google Drive برای Screenshot، Report، Control file و Artifact جدید غیرفعال است. کد Drive Control قدیمی دیگر از برنامه شروع نمی‌شود. جزئیات قرارداد و تست‌های محلی: [`docs/vercel-management-migration.md`](docs/vercel-management-migration.md).
 
 ### توقف اضطراری همه از سایت مدیریت
 
@@ -183,15 +185,9 @@ tell("یادآوری — ۱۰ دقیقه بعد", delay=600)            # در �
 - وضعیت صف: همان آدرس با مسیر `/bot/state` و همان کلید
 - سرور فقط روی `127.0.0.1` گوش می‌دهد و بدون کلید محلی جواب نمی‌دهد.
 
-## گوگل درایو (فقط دو پوشه)
+## محل Screenshot و گزارش‌های محلی
 
-```
-My Drive\Windows-Agent-DB\
-├── ScreenShots\    ← عکس‌ها
-└── logs\
-    ├── گزارش‌ها و نتیجه اجرای کدها (*_result.txt)
-    └── errors\     ← همه خطاها و مشکلات
-```
+داده‌ی محلی تازه فقط در `%LOCALAPPDATA%\Windows-Agent\` ذخیره می‌شود؛ شامل `ScreenShots`, `logs`, صف `screenshot_uploads` و state. Screenshotهای فرمان پس از فشرده‌سازی از مسیر multipart Management API آپلود می‌شوند. Google Drive مقصد ذخیره‌سازی یا fallback نیست.
 
 ## هیچ فایلی کنار برنامه نوشته نمی‌شود
 

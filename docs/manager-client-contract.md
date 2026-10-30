@@ -1,13 +1,13 @@
 # قرارداد اتصال `manager_client.py` به ایجنت مدیریت
 
-این سند نامه‌ی اجرایی ایجنت مدیریت به ایجنت مادر است. هدف، وصل‌کردن Windows Agent به Control Plane کلادفلر است؛ بدون خودبه‌روزرسانی و بدون نوشتن فایل کنار `app.py`.
+این سند قرارداد Agent با Management API رسمی Vercel است؛ بدون خودبه‌روزرسانی و بدون نوشتن فایل کنار `app.py`. جزئیات مهاجرت و outbox تصویر در [`vercel-management-migration.md`](vercel-management-migration.md) آمده است.
 
 ## مرز مسئولیت چهار ایجنت
 
 1. **ایجنت ویندوز:** برنامه‌ی در حال اجرا روی ویندوز؛ مجری فرمان، فرستنده‌ی Heartbeat، رخداد، نتیجه و metadata فایل‌ها.
 2. **ایجنت مادر:** سازنده و تنها نگهدارنده‌ی کد پایه‌ی ایجنت ویندوز (`app.py` و `run.bat`).
 3. **ایجنت همکار:** نویسنده‌ی `job_*.py`؛ بدون دسترسی به کد پایه‌ی ایجنت ویندوز.
-4. **ایجنت مدیریت:** سایت Cloudflare؛ پایش و فرماندهی ویندوز، کدنویسی و مدیریت کامل مخزن همکار، بدون تغییر خودکار کد پایه‌ی ایجنت ویندوز.
+4. **ایجنت مدیریت:** سایت `https://windows-agent-management.vercel.app`؛ پایش و فرماندهی ویندوز، بدون تغییر خودکار کد پایه‌ی ایجنت ویندوز.
 
 ## کار موردنیاز از ایجنت مادر
 
@@ -37,7 +37,7 @@ except ImportError:
 
 ```json
 {
-  "base_url": "https://windows-agent-management-cloudflare.soheylfriend.workers.dev/api/agent",
+  "base_url": "https://windows-agent-management.vercel.app/api/agent",
   "agent_key": "wam_agent_..."
 }
 ```
@@ -62,7 +62,7 @@ POST /heartbeat
   "agentId": "windows-agent-alibatel-main",
   "name": "ایجنت ویندوز اصلی",
   "platform": "windows",
-  "version": "1.7-20",
+  "version": "1.7-21",
   "commit": "شناسه‌ی واقعی Git HEAD در زمان اجرا",
   "status": "online",
   "capabilities": {
@@ -73,14 +73,18 @@ POST /heartbeat
     "open_report": true,
     "telegram_queue": true,
     "command_plane": true,
+    "database_automations": true,
     "d1_automations": true,
+    "vercel_blob_screenshot_upload": true,
+    "google_drive_artifacts": false,
     "emergency_stop_all": true
   },
   "state": {
+    "manager_base": "vercel",
     "auto_mode": false,
     "busy": null,
     "internet": true,
-    "drive": true
+    "drive": false
   },
   "message": "Windows Agent آماده است"
 }
@@ -155,6 +159,6 @@ api.status_note["manager"] = "وصل"  # «قطع»، «کلید نامعتبر�
 
 1. سایت در صفحه دیتابیس، Heartbeat ایجنت را حداکثر ۳۰ ثانیه پس از اجرا نشان دهد.
 2. با زدن «شروع تست اتصال»، Windows Agent درخواست را حداکثر پنج ثانیه بعد دریافت کند.
-3. پاسخ دقیق «سلام ایجنت مدیریت.» در D1 ثبت و وضعیت سایت «اتصال برقرار» شود.
+3. پاسخ دقیق «سلام ایجنت مدیریت.» در Management API ثبت و وضعیت سایت «اتصال برقرار» شود.
 4. بعد از غیرفعال‌کردن کلید، Heartbeat و تست با HTTP 401 رد شوند.
 5. نبود اینترنت یا سایت، UI و اجرای jobهای ویندوز را مختل نکند.
