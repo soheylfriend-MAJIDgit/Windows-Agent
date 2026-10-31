@@ -21,7 +21,7 @@
   <div class="header-tools">
     <table class="build-table" id="build-table" title="شناسنامه‌ی ساخت — برای اینکه بدانی کدام نسخه باز است">
       <tbody>
-        <tr><th>نسخه</th><td><b id="version">۱.۷-۱۵</b></td></tr>
+        <tr><th>نسخه</th><td><b id="version">۱.۷-۲۰</b></td></tr>
         <tr><th>شناسه ساخت</th><td><b id="build">—</b></td></tr>
         <tr><th>آخرین کامیت</th><td><b><span id="build-date">—</span> <span class="bt-sep">·</span> <span id="build-time">—</span></b></td></tr>
       </tbody>
@@ -71,6 +71,7 @@
         </div>
         <span class="execution-live-dot" aria-label="به‌روزرسانی زنده"></span>
       </div>
+      <p class="execution-control-status" id="execution-control-status" role="status" aria-live="polite"></p>
       <div class="execution-counters" id="execution-counters"></div>
       <button class="btn danger execution-stop-all" id="execution-stop-all" type="button">توقف فوری همه اجراهای ایجنت</button>
       <div class="execution-groups" id="execution-groups"></div>
@@ -145,8 +146,8 @@
     <article class="card">
       <div class="head-card">
         <div>
-          <h2>اتصال به ایجنت مدیریت (Cloudflare D1)</h2>
-          <p class="muted small">کلید ساخته‌شده در تب «کلید ایجنت» سایت مدیریت را وارد کن تا با رمزنگاری ویندوز (DPAPI) در <code>manager_secret.bin</code> ذخیره شود. پس از ذخیره، هر ۳۰ ثانیه Heartbeat و هر ۵ ثانیه بررسی تست اتصال به صورت خودکار در پس‌زمینه انجام می‌شود.</p>
+          <h2>اتصال به ایجنت مدیریت (Vercel)</h2>
+          <p class="muted small">کلید ساخته‌شده در تب «کلید ایجنت» سایت Vercel را وارد کن تا با DPAPI در <code>manager_secret.bin</code> ذخیره شود. Scopeهای لازم: <code>heartbeat:write</code>, <code>commands:read</code>, <code>events:write</code>, <code>results:write</code>, <code>artifacts:write</code>, <code>automations:read</code>. پس از ذخیره، Heartbeat و تست اتصال در پس‌زمینه انجام می‌شود؛ کلید در log یا URL نمی‌رود.</p>
         </div>
         <span class="chip due" id="mgr-status-badge">در انتظار کلید</span>
       </div>
@@ -154,7 +155,7 @@
       <div class="fields two">
         <label>
           <span>آدرس پایه API ایجنت مدیریت (<code>base_url</code>)</span>
-          <input id="mgr-base-url" dir="ltr" spellcheck="false" placeholder="https://windows-agent-management-cloudflare.soheylfriend.workers.dev/api/agent">
+          <input id="mgr-base-url" dir="ltr" spellcheck="false" placeholder="https://windows-agent-management.vercel.app/api/agent">
         </label>
         <label>
           <span>کلید ایجنت (<code>wam_agent_...</code> یا JSON کپی‌شده از سایت)</span>
@@ -177,6 +178,7 @@
         <p><b>کلید ذخیره‌شده:</b> <code id="mgr-key-prefix" dir="ltr">ثبت نشده</code></p>
         <p><b>آخرین Heartbeat موفق:</b> <span id="mgr-last-hb">—</span></p>
         <p><b>آخرین تست اتصال:</b> <span id="mgr-last-test">هنوز تستی دریافت نشده (پاسخ خودکار: «سلام ایجنت مدیریت.»)</span></p>
+        <p><b>صف Screenshot:</b> <span id="mgr-screenshot-upload-status">هنوز Screenshotی در صف نیست.</span></p>
         <p><b>مسیر فایل امن (DPAPI):</b> <code id="mgr-secret-path" dir="ltr">%LOCALAPPDATA%\Windows-Agent\manager_secret.bin</code></p>
       </div>
     </article>

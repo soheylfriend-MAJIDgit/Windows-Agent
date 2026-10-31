@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Windows Agent
 
 rem ===============================================================
-rem  Windows Agent launcher (v1.7-19 - direct Drive control + brain mode)
+rem  Windows Agent launcher (v1.7-22 - subprocess encoding fix)
 rem  Double-click this file to start the app.
 rem  Required packages are installed automatically on first run.
 rem ===============================================================
@@ -113,7 +113,7 @@ rem fallback: run with a console window (so errors are visible)
 if errorlevel 1 (
     echo.
     echo [ERROR] The app closed with an error.
-    echo Details are saved in: Google Drive\Windows-Agent-DB\logs\errors
+    echo Details are saved in: %%LOCALAPPDATA%%\Windows-Agent\logs\errors
     echo.
     pause
 )

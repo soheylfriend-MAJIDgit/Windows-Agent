@@ -46,7 +46,7 @@ def _read_app_version() -> str:
             return raw
     except (OSError, UnicodeError):
         pass
-    return "1.7-18"
+    return "1.7-22"
 
 APP_VERSION = _read_app_version()
 
@@ -54,10 +54,10 @@ APP_VERSION = _read_app_version()
 #  شناسنامه‌ی ساخت (اگر پوشه .git موجود باشد، مقدار واقعی از گیت خوانده می‌شود)
 #  این مقادیر «نسخه پشتیبان» هستند تا حتی بدون گیت هم چیزی نمایش داده شود.
 # ------------------------------------------------------------------
-BUILD_COMMIT = "d47c91e"
-BUILD_SUBJECT = "v1.7-18: brain mode toggle"
-BUILD_DATE_JALALI = "1405/08/03"
-BUILD_TIME_TEHRAN = "14:04"
+BUILD_COMMIT = "unknown"
+BUILD_SUBJECT = "Build identity is resolved from Git HEAD or the run.bat build stamp"
+BUILD_DATE_JALALI = "—"
+BUILD_TIME_TEHRAN = "—"
 
 # منطقه زمانی تهران (بدون وابستگی به تنظیمات ویندوز)
 TEHRAN = timezone(timedelta(hours=3, minutes=30), "Tehran")
@@ -78,16 +78,11 @@ PAGE_LOAD_SECONDS = 5
 SCREENSHOT_PREFIX = "google"
 
 # ------------------------------------------------------------------
-#  مسیرهای ذخیره
-#  گوگل درایو فقط دو چیز دارد: ScreenShots و logs
+#  مسیرهای داده: گزارش‌ها و تصاویر تازه فقط محلی می‌مانند؛ Drive بازنشسته است.
 # ------------------------------------------------------------------
-DRIVE_BASE_DIR = r"C:\Users\alibatel\My Drive\Windows-Agent-DB"
-
-# اسکرین‌شات‌ها  →  ...\Windows-Agent-DB\ScreenShots
-SCREENSHOT_DIR = DRIVE_BASE_DIR + r"\ScreenShots"
-
-# گزارش‌ها و نتیجه کدها  →  ...\Windows-Agent-DB\logs
-REPORT_DIR = DRIVE_BASE_DIR + r"\logs"
+DRIVE_BASE_DIR = ""  # legacy read-only compatibility; never a new write destination
+SCREENSHOT_DIR = ""  # resolves to %LOCALAPPDATA%\\Windows-Agent\\ScreenShots
+REPORT_DIR = ""  # resolves to %LOCALAPPDATA%\\Windows-Agent\\logs
 
 # پوشه‌ی خود برنامه — هیچ فایلی اینجا نوشته نمی‌شود
 LOCAL_BASE_DIR = Path(__file__).resolve().parent
@@ -288,7 +283,7 @@ def build_info() -> dict:
     except OSError:
         pass
 
-    # اگر برنامه از طریق بروزرسانی خودکار به‌روز شده باشد، هش واقعی این‌جاست
+    # run.bat هش واقعی Git HEAD را در LocalAppData می‌نویسد؛ فایل قدیمی نباید بر Git HEAD غلبه کند.
     try:
         import json
 
@@ -302,7 +297,10 @@ def build_info() -> dict:
                 source="stamp",
                 source_label="اجرای run.bat",
             )
-            return info
+            # In a Git checkout, prefer the current HEAD below so an old stamp can never
+            # make a newer source tree look like a stale build.
+            if not (base / ".git").exists():
+                return info
     except (OSError, ValueError):
         pass
 
@@ -319,6 +317,8 @@ def build_info() -> dict:
             ["git", "-C", str(base), "log", "-1", "--format=%h%x1f%ct%x1f%s"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             creationflags=(subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0),
         )
@@ -337,6 +337,8 @@ def build_info() -> dict:
             ["git", "-C", str(base), "status", "--porcelain"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             creationflags=(subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0),
         )
@@ -403,33 +405,11 @@ def get_desktop_dir() -> Path:
 
 
 def resolve_dir(target_setting: str | None, fallback_subfolder: str | None = None) -> tuple[Path, bool]:
-    """پوشه مقصد را برمی‌گرداند.
-
-    خروجی: (مسیر، آیا مسیر گوگل درایو استفاده شد؟)
-
-    قانون مهم: خود پوشه‌ی `My Drive` هرگز ساخته نمی‌شود؛ فقط زیرپوشه‌های داخل
-    پوشه پروژه ساخته می‌شوند. چون اگر Google Drive اجرا نباشد، ساختن دستی
-    آن پوشه یک پوشه‌ی محلی بی‌فایده می‌سازد که هیچ‌وقت sync نمی‌شود.
-    """
-    target: Path | None = Path(target_setting) if target_setting else None
-    if target is not None and not target.is_absolute():
-        target = None  # فقط مسیرهای مطلق ویندوزی معتبرند
-
-    if target is not None:
-        if target.is_dir():
-            return target, True
-        # پوشه نیست؛ فقط اگر پوشه‌ی والدش (که گوگل درایو ساخته) موجود باشد می‌سازیم
-        if target.parent.is_dir():
-            try:
-                target.mkdir(exist_ok=True)
-                return target, True
-            except OSError:
-                pass
-
-    base = Path(FALLBACK_BASE_DIR) if FALLBACK_BASE_DIR else get_desktop_dir()
-    if fallback_subfolder:
-        base = base / fallback_subfolder
-    return base, False
+    """Resolve legacy screenshot/report requests into LocalAppData only; never writes to Drive/Desktop."""
+    name = fallback_subfolder or "data"
+    folder = STATE_DIR / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder, False
 
 
 def error_dir() -> Path:
@@ -473,17 +453,20 @@ def write_error(context: str, detail: str = "") -> Path | None:
 
 
 def drive_available() -> bool:
-    """آیا پوشه‌ی پروژه در گوگل درایو در دسترس است؟"""
-    base = Path(DRIVE_BASE_DIR)
-    return base.is_absolute() and base.is_dir()
+    """Google Drive is not a storage destination for new screenshots, reports, or artifacts."""
+    return False
 
 
 def resolve_screenshot_dir() -> tuple[Path, bool]:
-    return resolve_dir(SCREENSHOT_DIR, "ScreenShots")
+    folder = STATE_DIR / "ScreenShots"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder, False
 
 
 def resolve_report_dir() -> tuple[Path, bool]:
-    return resolve_dir(REPORT_DIR, "logs")
+    folder = STATE_DIR / "logs"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder, False
 
 
 def human_size(num_bytes: int) -> str:
@@ -1158,6 +1141,8 @@ def run_code_job(path: Path, execution_source: str = "دفترچه", execution_m
         if exec_manager is not None:
             exec_manager.set_execution_process(execution_id, proc, path.stem.replace("_", " "), execution_source,
                                                workspace_path=str(path.parent), execution_mode=execution_mode)
+            tracked = next((r for r in exec_manager.get_execution_registry() if r.get("execution_id") == execution_id), {})
+            start_marker = tracked.get("process_start_marker")
             if cancel_event is not None:
                 exec_manager.bind_execution_cancel_event(execution_id, cancel_event)
         deadline = time.monotonic() + CODES_MAX_RUNTIME
@@ -1177,7 +1162,25 @@ def run_code_job(path: Path, execution_source: str = "دفترچه", execution_m
                 stderr_text = (stderr_raw or b"").decode("utf-8", errors="replace")
                 break
             except subprocess.TimeoutExpired:
+                if exec_manager is not None:
+                    exec_manager.snapshot_execution_tree(execution_id, int(proc.pid), start_marker)
                 continue
+        if stop_reason is None and exec_manager is not None:
+            children = exec_manager.snapshot_execution_tree(execution_id, int(proc.pid), start_marker)
+            while children:
+                if cancel_event is not None and cancel_event.is_set():
+                    stop_reason = "CANCELLED"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stop_reason = "TIMEOUT"
+                    break
+                current_row = next((r for r in exec_manager.get_execution_registry() if r.get("execution_id") == execution_id), {})
+                exec_manager.update_execution(execution_id, status="monitoring", stage="monitoring",
+                                              child_pids=children, owned_processes=current_row.get("owned_processes", []),
+                                              last_message="Process اصلی پایان یافت؛ فرزندهای متعلق هنوز پایش می‌شوند.")
+                time.sleep(min(0.1, remaining))
+                children = exec_manager.snapshot_execution_tree(execution_id, int(proc.pid), start_marker)
         if stop_reason:
             if exec_manager is not None:
                 stop_result = exec_manager._terminate_execution_tree(execution_id, proc, 2.0)
@@ -1269,33 +1272,8 @@ def check_internet(timeout: float = 1.5) -> bool:
 
 
 def check_google_drive() -> tuple[bool, str]:
-    """آیا گوگل درایو (Drive for Desktop) وصل است؟"""
-    options = [Path(DRIVE_BASE_DIR)]
-    home_drive = Path.home() / "My Drive"
-    options.append(home_drive)
-
-    for path in options:
-        try:
-            if path.is_dir():
-                return True, "مسیر در دسترس است"
-        except OSError:
-            continue
-
-    if IS_WINDOWS:
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq GoogleDriveFS.exe", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=4,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if "GoogleDriveFS" in out.stdout:
-                return False, "برنامه Drive باز است ولی مسیر My Drive پیدا نشد"
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    return False, "در دسترس نیست"
+    """Legacy UI check: Drive is intentionally disabled for new controls and artifacts."""
+    return False, "ذخیره‌سازی Google Drive بازنشسته است؛ داده‌ها محلی یا از API مدیریت ارسال می‌شوند."
 
 
 
@@ -1530,6 +1508,7 @@ class Api:
         self._auto_watch_execution_id = "background_auto_watch"
         self._active_job_execution_id: str | None = None
         self._active_job_cancel_event = threading.Event()
+        self._emergency_control_status = ""
         self.auto_next = 0.0
         # شناسنامه‌ی ساخت یک‌بار خوانده می‌شود (git در هر ۰.۷ ثانیه اجرا نشود)
         self.build = build_info()
@@ -2332,7 +2311,7 @@ class Api:
         """وضعیت کلاینت ایجنت مدیریت در RAM (بدون هیچ کار شبکه‌ای)."""
         info = {
             "configured": False,
-            "base_url": "https://windows-agent-management-cloudflare.soheylfriend.workers.dev/api/agent",
+            "base_url": "https://windows-agent-management.vercel.app/api/agent",
             "key_prefix": "",
             "agent_id": "windows-agent-alibatel-main",
             "last_heartbeat_at": "",
@@ -2349,6 +2328,7 @@ class Api:
             info["secret_file"] = str(manager_client.SECRET_FILE)
         except Exception:
             pass
+        info["emergency_control_status"] = self._emergency_control_status or info.get("emergency_control_status", "")
         info["connected"] = bool(self.status.get("manager"))
         info["note"] = str(self.status_note.get("manager") or "در انتظار کلید")
         return info
@@ -2404,6 +2384,21 @@ class Api:
             self.log(f"لغو محلی ممکن نشد: {exc}")
             self.toast("لغو محلی ممکن نشد", "error")
             return {"ok": False, "state": self.get_state()}
+
+    def prepare_emergency_stop_all(self, reason: str = "توقف فوری همه اجراها از سایت مدیریت", control_id: str = "") -> None:
+        """Pause scheduling (without changing Automatic) and show the site emergency request locally."""
+        self._execution_monitor_paused = True
+        self._watch_stop.set()
+        self._emergency_control_status = "درخواست توقف همه از سایت مدیریت دریافت شد"
+        self.log(f"توقف اضطراری سایت مدیریت دریافت شد{(' (' + control_id + ')') if control_id else ''}؛ Automatic تغییر نکرد.")
+
+    def set_emergency_control_status(self, message: str) -> None:
+        """Update the live-center line from the independent Manager heartbeat worker."""
+        text = str(message or "")[:240]
+        if text == self._emergency_control_status:
+            return
+        self._emergency_control_status = text
+        self.log(text)
 
     def manager_stop_execution(self, execution_id: str, confirmed: bool = False) -> dict:
         """درخواست توقف یک اجرای ثبت‌شده؛ PID فقط از registry و marker معتبر دنبال می‌شود."""
@@ -2573,7 +2568,14 @@ class Api:
         self.settings["auto"] = enabled
         save_settings(self.settings)
         if enabled:
-            self._execution_monitor_paused = False
+            emergency_in_progress = False
+            try:
+                import manager_client
+                emergency_in_progress = manager_client.emergency_stop_in_progress()
+            except Exception:
+                pass
+            if not emergency_in_progress:
+                self._execution_monitor_paused = False
             self.sound("success")
             self.log("⚡ حالت خودکار روشن شد — بررسی و اجرا بدون پرسیدن.")
             self.toast("حالت خودکار روشن شد")
@@ -2817,7 +2819,7 @@ class Api:
         path = take_screenshot(dest)
         self.sound("shutter")
         self.log(f"✅ اسکرین‌شات ذخیره شد → {path}")
-        self.log(f"   محل: {'گوگل درایو' if on_drive else 'دسکتاپ (درایو در دسترس نبود)'}")
+        self.log("   محل: فضای محلی Windows Agent (LocalAppData)")
         self.toast("اسکرین‌شات گرفته شد")
 
     def _job_report(self) -> None:
@@ -2826,8 +2828,7 @@ class Api:
         dest, on_drive = resolve_report_dir()
         path = save_report(format_windows_report(windows), dest)
         self.log(f"✅ گزارش ذخیره شد ({len(windows)} پنجره) → {path.name}")
-        if not on_drive:
-            self.log("   ⚠️ گوگل درایو در دسترس نبود؛ روی دسکتاپ ذخیره شد.")
+        self.log("   محل: فضای محلی Windows Agent (LocalAppData)")
         self.sound("success")
         self.toast("گزارش ذخیره شد")
 

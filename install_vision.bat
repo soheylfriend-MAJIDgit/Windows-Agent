@@ -23,9 +23,19 @@ if errorlevel 2 exit /b 0
 
 set "PY_CMD="
 where py >nul 2>nul && py -3.11 -c "import sys; print(sys.version)" >nul 2>nul && set "PY_CMD=py -3.11"
-if not defined PY_CMD where python >nul 2>nul && set "PY_CMD=python"
 if not defined PY_CMD (
-    echo [ERROR] Python was not found. Python 3.11 is recommended for the pinned PaddleOCR packages.
+    where python >nul 2>nul
+    if not errorlevel 1 (
+        python -c "import sys; raise SystemExit(0 if (3, 9) <= sys.version_info[:2] <= (3, 11) else 1)" >nul 2>nul
+        if not errorlevel 1 set "PY_CMD=python"
+    )
+)
+if not defined PY_CMD (
+    echo [ERROR] PaddleOCR needs Python 3.9, 3.10, or 3.11. Python 3.13 is not supported by these pinned packages.
+    echo Install Python 3.11 x64 alongside your current Python, then run this installer again.
+    echo Installed Python interpreters:
+    where py >nul 2>nul && py -0p
+    where python >nul 2>nul && python --version
     pause
     exit /b 1
 )

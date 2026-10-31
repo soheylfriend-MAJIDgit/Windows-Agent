@@ -1,33 +1,10 @@
-# -*- coding: utf-8 -*-
-"""کلاینت پس‌زمینه‌ی اتصال Windows Agent به ایجنت مدیریت (Cloudflare Control Plane & D1 Automations).
+"""Background client for the Windows Agent's Vercel Management API.
 
-این ماژول کاملاً مستقل از ``app.py`` و فقط با کتابخانه‌ی استاندارد پایتون نوشته شده است.
-
-مرز امنیتی و قرارداد اتوماسیون‌ها:
-  - کدهای اتوماسیون (``job_*.py``) که از کاتالوگ Cloudflare D1 دریافت و اجرا می‌شوند،
-    تحت هیچ شرایطی مجاز به تغییر کد پایه Windows Agent (``app.py``, ``manager_client.py``, ``run.bat``)،
-    خواندن فایل کلید ``manager_secret.bin`` یا دست‌کاری فایل‌های شخصی خارج از حوزه‌ی کاری خود نیستند.
-  - کلید دائمی مدیریت (Bearer Key) و اسرار DPAPI هرگز در متغیرهای محیطی (Environment) زیرفرآیند
-    اتوماسیون قرار نمی‌گیرند.
-
-وظایف ماژول:
-  ۱. ذخیره‌ی امن ``base_url`` و ``agent_key`` با Windows DPAPI در:
-     ``%LOCALAPPDATA%\\Windows-Agent\\manager_secret.bin``
-  ۲. ارسال Heartbeat بلافاصله پس از شروع و سپس هر ۳۰ ثانیه به ``POST /heartbeat``
-     همراه با ``capabilities.command_plane = True`` و ``capabilities.d1_automations = True``
-  ۳. بررسی تست اتصال هر ۵ ثانیه از ``GET /connection-test`` و پاسخ خودکار با
-     ``expectedReply`` بدون تغییر (``سلام ایجنت مدیریت.``) به ``POST /connection-test``
-  ۴. دریافت فرمان‌های مجاز از ``POST /commands/claim``:
-     - ``run_automation``: دریافت مستقیم نسخه‌ی کد از کاتالوگ Cloudflare D1
-       (``GET /api/agent/automations/{automationId}/versions/{versionId}``)، بررسی دقیق SHA-256،
-       ذخیره در فضای کاری موقت مختص همان فرمان و اجرا بدون هیچ وابستگی به Git یا GitHub
-     - ``run_arena_prompt`` و ``sync_and_run_job``: حفظ سازگاری عقب‌رو برای Rollback
-  ۵. رعایت سیاست محلی دستی/خودکار Windows Agent (گرفتن تأیید محلی در حالت دستی پیش از اجرا)
-  ۶. اجرای زیرفرآیند در Process Group مستقل، خواندن غیرمسدودکننده‌ی stdout با نخ و صف جدا،
-     پایش لغو (``GET /commands/{id}`` هر <= ۱.۵ ثانیه)، ``timeoutSeconds``، ``noProgressSeconds`` و
-     توقف کامل درخت فرآیند با ``taskkill /PID <pid> /T /F`` پس از بررسی زمان شروع و نام اجرایی فرآیند
-  ۷. ثبت مرحله‌به‌مرحله‌ی رخدادها در ``POST /commands/{id}/events`` و ذخیره‌ی تصویرها فقط در
-     Google Drive همراه با ارسال فراداده (بدون هیچ بایت تصویر یا Base64) به ``POST /commands/{id}/artifacts``.
+Credentials are DPAPI-protected under LocalAppData; runtime state and screenshot outbox
+are stored under the same per-user state directory. The client preserves the local
+Manual/Automatic policy, command allowlist, process ownership checks, and cancellation.
+Screenshots use only authenticated multipart POST /screenshots; no Blob credential,
+Database URL, or Google Drive storage path is exposed to the Agent.
 """
 
 from __future__ import annotations
@@ -52,8 +29,14 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 
-DEFAULT_BASE_URL = "https://windows-agent-management-cloudflare.soheylfriend.workers.dev/api/agent"
+DEFAULT_BASE_URL = "https://windows-agent-management.vercel.app/api/agent"
+LEGACY_BASE_URL_HOST = "windows-agent-management-cloudflare.soheylfriend.workers.dev"
+SCREENSHOT_UPLOAD_MAX_BYTES = 4 * 1024 * 1024
+SCREENSHOT_SAFE_MAX_BYTES = 3_800_000
+SCREENSHOT_RETRY_STEPS = (5.0, 15.0, 30.0, 60.0)
+SCREENSHOT_UPLOAD_URL = "/screenshots"
 DEFAULT_AGENT_ID = "windows-agent-alibatel-main"
 DEFAULT_AGENT_NAME = "ایجنت ویندوز اصلی"
 DEFAULT_EXPECTED_REPLY = "سلام ایجنت مدیریت."
@@ -143,6 +126,8 @@ SECRET_FILE = STATE_DIR / "manager_secret.bin"
 ACTIVE_COMMAND_FILE = STATE_DIR / "active_command.json"
 WORKSPACES_DIR = STATE_DIR / "cmd_workspaces"
 VISION_DIR = STATE_DIR / LOCAL_VISION_SUBDIR
+SCREENSHOT_QUEUE_DIR = STATE_DIR / "screenshot_uploads"
+SCREENSHOT_MANIFEST_DIR = SCREENSHOT_QUEUE_DIR / "queue"
 
 
 def utc_iso_now() -> str:
@@ -266,6 +251,18 @@ def normalize_base_url(url: str | None) -> str:
     if not raw:
         return DEFAULT_BASE_URL
     raw = raw.rstrip("/")
+    if "://" not in raw:
+        raw = "https://" + raw.lstrip("/")
+    try:
+        parsed_url = urlsplit(raw)
+        if (parsed_url.scheme.lower() != "https" or not parsed_url.hostname or parsed_url.username
+                or parsed_url.password or parsed_url.query or parsed_url.fragment):
+            return DEFAULT_BASE_URL
+        raw = urlunsplit(("https", parsed_url.netloc, parsed_url.path.rstrip("/"), "", ""))
+        if (parsed_url.hostname or "").lower() == LEGACY_BASE_URL_HOST:
+            return DEFAULT_BASE_URL
+    except ValueError:
+        return DEFAULT_BASE_URL
     for suffix in ("/ping", "/heartbeat", "/connection-test", "/commands/claim", "/commands"):
         if raw.endswith(suffix):
             raw = raw[: -len(suffix)].rstrip("/")
@@ -275,6 +272,16 @@ def normalize_base_url(url: str | None) -> str:
         else:
             raw = raw + "/api/agent"
     return raw
+
+
+def _is_official_manager_base(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return (parsed.scheme == "https" and (parsed.hostname or "").lower() == "windows-agent-management.vercel.app"
+                and parsed.port in (None, 443) and parsed.path.rstrip("/") == "/api/agent"
+                and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment)
+    except ValueError:
+        return False
 
 
 def mask_key(agent_key: str | None) -> str:
@@ -318,6 +325,8 @@ def parse_config_input(base_url: str | None, key_or_json: str | None) -> tuple[s
 def save_secret(base_url: str | None, key_or_json: str | None, agent_id: str | None = None) -> dict:
     """ذخیره‌ی امن ``base_url`` و ``agent_key`` با DPAPI در ``manager_secret.bin``."""
     norm_url, clean_key = parse_config_input(base_url, key_or_json)
+    if not _is_official_manager_base(norm_url):
+        raise ValueError("برای حفاظت از کلید، فقط آدرس رسمی Vercel Management API پذیرفته می‌شود.")
     if not clean_key:
         existing = load_secret()
         if existing and existing.get("agent_key"):
@@ -364,8 +373,28 @@ def load_secret() -> dict | None:
         agent_key = str(data.get("agent_key") or "").strip()
         if not agent_key:
             return None
+        stored_base = str(data.get("base_url") or "").strip()
+        norm_base = normalize_base_url(stored_base)
+        try: migrated_legacy = (urlsplit(stored_base).hostname or "").lower() == LEGACY_BASE_URL_HOST
+        except ValueError: migrated_legacy = False
+        if not _is_official_manager_base(norm_base):
+            with _lock:
+                _runtime_info["last_error"] = "پیکربندی مدیریت غیررسمی است؛ فقط Vercel Management API مجاز است."
+            return None
+        if migrated_legacy or stored_base != norm_base:
+            # One-time DPAPI re-seal of the endpoint only. Preserve the existing key for
+            # authenticated validation; 401/403 are surfaced without retrying it rapidly.
+            data["base_url"] = norm_base
+            data["updated_at"] = time.time()
+            raw_new = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            tmp_path = SECRET_FILE.with_suffix(".tmp")
+            tmp_path.write_bytes(dpapi_encrypt(raw_new))
+            tmp_path.replace(SECRET_FILE)
+            if migrated_legacy:
+                with _lock:
+                    _runtime_info["migration_notice"] = "آدرس قدیمی Cloudflare با حفظ کلید رمز‌شده به Vercel منتقل شد."
         return {
-            "base_url": normalize_base_url(data.get("base_url")),
+            "base_url": norm_base,
             "agent_key": agent_key,
             "agent_id": str(data.get("agent_id") or DEFAULT_AGENT_ID).strip() or DEFAULT_AGENT_ID,
         }
@@ -399,7 +428,7 @@ _REDACT_PATTERNS = (
 
 
 def redact_sensitive(text: str | None, max_len: int = 1800) -> str:
-    """حذف هرگونه کلید، توکن، هدر Authorization و مسیر کامل کاربر پیش از ارسال به D1."""
+    """حذف هرگونه کلید، توکن، هدر Authorization و مسیر کامل کاربر پیش از ارسال به Management API."""
     cleaned = str(text or "")
     for pattern, repl in _REDACT_PATTERNS:
         cleaned = pattern.sub(repl, cleaned)
@@ -409,7 +438,13 @@ def redact_sensitive(text: str | None, max_len: int = 1800) -> str:
     return cleaned
 
 
-# ------------------------------------ شبکه با Proxy و TLS Fallback ---
+# ------------------------------------ شبکه با Proxy و TLS معتبر ---
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Bearer credentials must never follow a redirect to another authority.
+        return None
+
 
 def _system_proxy() -> str | None:
     try:
@@ -450,6 +485,7 @@ def _request_once(
         except Exception:
             pass
 
+    handlers.append(_NoRedirectHandler())
     opener = urllib.request.build_opener(*handlers)
     headers = {
         "Authorization": f"Bearer {agent_key}",
@@ -494,6 +530,28 @@ def _request_once(
         return False, 0, {"error": str(exc)}, False
 
 
+def _agent_key_fingerprint(agent_key: str) -> str:
+    return hashlib.sha256(str(agent_key or "").encode("utf-8")).hexdigest()
+
+
+def _mark_agent_key_invalid(agent_key: str) -> None:
+    global _auth_blocked_agent_key_fingerprint, _auth_blocked_agent_key_until, _auth_blocked_until
+    _auth_blocked_agent_key_fingerprint = _agent_key_fingerprint(agent_key)
+    _auth_blocked_agent_key_until = time.monotonic() + 60.0
+    _auth_blocked_until = max(_auth_blocked_until, _auth_blocked_agent_key_until)
+
+
+def _agent_key_blocked(agent_key: str) -> bool:
+    global _auth_blocked_agent_key_fingerprint, _auth_blocked_agent_key_until, _auth_blocked_until
+    fingerprint = _agent_key_fingerprint(agent_key)
+    if fingerprint != _auth_blocked_agent_key_fingerprint:
+        _auth_blocked_agent_key_fingerprint = ""
+        _auth_blocked_agent_key_until = 0.0
+        _auth_blocked_until = 0.0
+        return False
+    return time.monotonic() < _auth_blocked_agent_key_until
+
+
 def _http_json(
     method: str,
     url: str,
@@ -501,14 +559,64 @@ def _http_json(
     payload: dict | None = None,
     timeout: float = HTTP_TIMEOUT,
 ) -> tuple[bool, int, dict]:
-    """فراخوانی HTTP با پشتیبانی از پروکسی ویندوز و تلاش مجدد بدون بررسی گواهی در صورت خطای TLS."""
-    ok, code, data, cert_problem = _request_once(method, url, agent_key, payload, timeout, False)
-    if not cert_problem:
-        return ok, code, data
-    ok2, code2, data2, _ = _request_once(method, url, agent_key, payload, timeout, True)
-    if isinstance(data2, dict):
-        data2["_tls_insecure"] = True
-    return ok2, code2, data2
+    """Authenticated JSON request using verified HTTPS only; invalid keys are throttled globally."""
+    if _agent_key_blocked(agent_key):
+        return False, 401, {"error": {"code": "auth_retry_blocked", "message": "کلید قبلاً نامعتبر پاسخ داده است."}}
+    ok, code, data, _cert_problem = _request_once(method, url, agent_key, payload, timeout, False)
+    if code == 401:
+        _mark_agent_key_invalid(agent_key)
+    return ok, code, data
+
+
+def _http_multipart_file(url: str, agent_key: str, fields: dict, file_path: Path,
+                        timeout: float = HTTP_TIMEOUT) -> tuple[int, dict]:
+    """Authenticated multipart upload; never logs headers, key, image bytes, or raw Blob URL."""
+    if _agent_key_blocked(agent_key):
+        return 401, {"error": {"code": "auth_retry_blocked", "message": "کلید قبلاً نامعتبر پاسخ داده است."}}
+    boundary = "----WindowsAgent" + uuid.uuid4().hex
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        safe_name = re.sub(r"[^A-Za-z0-9_-]", "", str(name))
+        if not safe_name:
+            continue
+        chunks.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{safe_name}\"\r\n\r\n".encode(),
+                       str(value).encode("utf-8"), b"\r\n"))
+    filename = re.sub(r"[^A-Za-z0-9_.-]", "_", file_path.name)[:120] or "screenshot.png"
+    mime = "image/jpeg" if file_path.suffix.lower() in (".jpg", ".jpeg") else ("image/webp" if file_path.suffix.lower() == ".webp" else "image/png")
+    chunks.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n".encode(),
+                   file_path.read_bytes(), b"\r\n", f"--{boundary}--\r\n".encode()))
+    body = b"".join(chunks)
+    handlers: list = []
+    proxy = _system_proxy()
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    try:
+        import certifi  # type: ignore
+        handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=certifi.where())))
+    except Exception:
+        pass
+    handlers.append(_NoRedirectHandler())
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {agent_key}", "Accept": "application/json",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": "Windows-Agent/1.8 (Windows NT 10.0; Win64; x64)",
+    })
+    try:
+        with opener.open(req, timeout=timeout) as response:
+            code = int(getattr(response, "status", 200) or 200)
+            raw = response.read(65536).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        code = int(exc.code)
+        try: raw = exc.read(65536).decode("utf-8", "replace")
+        except OSError: raw = "{}"
+    except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+        return 0, {"error": {"code": "network_error", "message": type(exc).__name__}}
+    try: data = json.loads(raw or "{}")
+    except ValueError: data = {}
+    if code == 401:
+        _mark_agent_key_invalid(agent_key)
+    return code, data if isinstance(data, dict) else {}
 
 
 # ------------------------------------ اعتبارسنجی امنیتی فرمان و مسیر ---
@@ -609,7 +717,7 @@ def validate_command_security(cmd: dict, codes_dir: Path | None = None) -> tuple
             or "#" in endpoint
             or endpoint != expected_endpoint
         ):
-            return False, job_name, None, "آدرس sourceEndpoint غیرمجاز است؛ فقط مسیر نسبی دقیق اتوماسیون در D1 مجاز است."
+            return False, job_name, None, "آدرس sourceEndpoint غیرمجاز است؛ فقط مسیر نسبی دقیق اتوماسیون در Management API مجاز است."
 
     base_codes = (codes_dir or _get_codes_dir()).resolve()
     candidate = (base_codes / job_name).resolve()
@@ -795,7 +903,9 @@ def _marker_matches(pid: int, marker: float | None) -> bool:
 
 class _RecoveredProcessHandle:
     def __init__(self, pid: int, marker: float | None): self.pid, self.marker = int(pid), marker
-    def poll(self): return None if _marker_matches(self.pid, self.marker) else 0
+    def poll(self):
+        # Without a persisted marker the PID is never treated as a live owned root.
+        return 0 if self.marker is None else (None if _marker_matches(self.pid, self.marker) else 0)
     def wait(self, timeout=None):
         end = time.monotonic() + (timeout or 0)
         while self.poll() is None and time.monotonic() < end: time.sleep(0.02)
@@ -807,7 +917,9 @@ class _RecoveredProcessHandle:
 def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, execution_id="", known_owned=None) -> dict:
     if proc is None: return {"ok": False, "remaining": [], "child_pids": [], "duration": 0.0}
     started = time.monotonic(); deadline = started + max(0.1, float(timeout_seconds)); root = int(proc.pid)
-    if expected_marker is None: expected_marker = _get_process_start_marker(root)
+    unverified_recovered_root = isinstance(proc, _RecoveredProcessHandle) and proc.marker is None
+    if expected_marker is None and not isinstance(proc, _RecoveredProcessHandle):
+        expected_marker = _get_process_start_marker(root)
     try: process_still_running = proc.poll() is None
     except Exception: process_still_running = False
     if expected_marker is None and process_still_running:
@@ -828,10 +940,12 @@ def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, executi
                 owned[pid] = {"pid": pid, "parent_pid": item.get("parent_pid"), "start_marker": marker}
         except Exception: pass
     if root_alive: owned[root] = {"pid": root, "parent_pid": os.getpid(), "start_marker": expected_marker}
-    if not owned: return {"ok": True, "remaining": [], "child_pids": [], "duration": time.monotonic()-started}
+    if not owned and not unverified_recovered_root:
+        return {"ok": True, "remaining": [], "child_pids": [], "duration": time.monotonic()-started}
     def discover():
-        if root_alive:
-            for item in _owned_descendants(root):
+        parents = [pid for pid, item in list(owned.items()) if _marker_matches(pid, item.get("start_marker"))]
+        for parent_pid in parents:
+            for item in _owned_descendants(parent_pid):
                 if item["start_marker"] is not None:
                     old = owned.get(item["pid"])
                     if old is None or old.get("start_marker") == item["start_marker"]: owned[item["pid"]] = item
@@ -875,6 +989,8 @@ def _terminate_process_tree(proc, expected_marker, timeout_seconds=20.0, executi
                 except Exception: pass
         time.sleep(0.025)
     discover(); remaining=sorted(pid for pid,it in owned.items() if _marker_matches(pid,it.get("start_marker")))
+    if unverified_recovered_root:
+        remaining = sorted(set(remaining + [root]))
     try: proc.wait(timeout=max(0.01,min(0.1,deadline-time.monotonic())))
     except Exception: pass
     children=sorted(pid for pid in owned if pid != root); duration=time.monotonic()-started
@@ -1277,6 +1393,10 @@ def clear_local_cancel() -> None:
         _local_cancel_event.clear()
 
 
+def emergency_stop_in_progress() -> bool:
+    return _emergency_control_gate.is_set()
+
+
 def probe_network_health(base_url: str, agent_key: str, timeout: float = HTTP_TIMEOUT) -> bool:
     """بررسی سبک و سریع سلامت ارتباط با API ایجنت مدیریت با Timeout محدود."""
     if _network_probe_override is not None:
@@ -1305,9 +1425,21 @@ def is_network_resilience_ready() -> bool:
 
 _lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
+_screenshot_upload_thread: threading.Thread | None = None
+_screenshot_upload_wake = threading.Event()
+_screenshot_upload_lock = threading.RLock()
+_command_sessions: dict[str, object] = {}
 _command_thread: threading.Thread | None = None
 _command_lock = threading.Lock()
 _claim_in_progress = False
+_auth_blocked_until = 0.0
+_auth_blocked_agent_key_fingerprint = ""
+_auth_blocked_agent_key_until = 0.0
+_auth_blocked_operations: dict[str, float] = {}
+_screenshot_auth_blocked_key = ""
+_emergency_lock = threading.RLock()
+_emergency_control_gate = threading.Event()
+_emergency_control_inflight: set[str] = set()
 _stop_event = threading.Event()
 _wake_event = threading.Event()
 _api_ref = None
@@ -1331,6 +1463,10 @@ _runtime_info: dict = {
     "last_error": "",
     "arena_vision_ocr_ready": False,
     "network_resilience_ready": False,
+    "emergency_control_status": "",
+    "emergency_control_id": "",
+    "screenshot_upload_status": "",
+    "screenshot_upload_message": "",
     "ocr_engine": "paddleocr",
     "ocr_local_only": True,
 }
@@ -1392,6 +1528,18 @@ def register_execution(execution_id: str, title: str, source: str, execution_mod
         _execution_records[execution_id] = row; _persist_execution_registry(); return dict(row)
 
 
+def allocate_execution_event_seq(execution_id: str) -> int:
+    _load_execution_registry()
+    with _execution_lock:
+        row = _execution_records.get(execution_id)
+        if row is None: return 1
+        seq = int(row.get("event_seq") or 0) + 1
+        row["event_seq"] = seq
+        row["updated_at"] = utc_iso_now()
+        _persist_execution_registry()
+        return seq
+
+
 def update_execution(execution_id: str, **fields) -> dict | None:
     _load_execution_registry()
     with _execution_lock:
@@ -1449,6 +1597,39 @@ def set_execution_process(execution_id: str, proc: subprocess.Popen, title: str,
                            status="running", stage="process_started", last_message="Process شروع شد.", **fields)
 
 
+def snapshot_execution_tree(execution_id: str, root_pid: int, root_marker: float | None) -> list[int]:
+    """Persist only marker-verified descendants of an execution's verified root."""
+    row = next((r for r in get_execution_registry() if r.get("execution_id") == execution_id), {})
+    owned_by_pid = {int(item["pid"]): dict(item) for item in (row.get("owned_processes") or [])
+                    if isinstance(item, dict) and item.get("pid")}
+    root_alive = root_marker is not None and _marker_matches(int(root_pid), root_marker)
+    if root_alive:
+        owned_by_pid[int(root_pid)] = {"pid": int(root_pid), "parent_pid": os.getpid(), "start_marker": root_marker}
+    known_parents = [pid for pid, item in owned_by_pid.items() if _marker_matches(pid, item.get("start_marker"))]
+    for parent_pid in known_parents:
+        for item in _owned_descendants(parent_pid):
+            try:
+                pid, marker = int(item["pid"]), item.get("start_marker")
+                if marker is not None:
+                    old = owned_by_pid.get(pid)
+                    if old is None or old.get("start_marker") == marker:
+                        owned_by_pid[pid] = item
+            except Exception:
+                continue
+    owned = [item for item in owned_by_pid.values()
+             if item.get("start_marker") is not None and _marker_matches(int(item["pid"]), item["start_marker"])]
+    children = sorted(int(item["pid"]) for item in owned if int(item["pid"]) != int(root_pid))
+    if row.get("status") == "stopping":
+        status, stage = "stopping", "termination_started"
+    else:
+        status = "running" if root_alive else ("monitoring" if children else row.get("status", "running"))
+        stage = "running" if root_alive else ("monitoring" if children else row.get("stage", "running"))
+    update_execution(execution_id, status=status, stage=stage, pid=int(root_pid),
+                     process_start_marker=root_marker, owned_processes=owned, child_pids=children,
+                     last_message="پایش فرزندان متعلق پس از پایان Process اصلی." if children and not root_alive else row.get("last_message", ""))
+    return children
+
+
 def bind_execution_cancel_event(execution_id: str, event: threading.Event) -> None:
     with _execution_lock:
         _command_cancel_events[execution_id] = event
@@ -1463,13 +1644,36 @@ def complete_execution(execution_id: str, status: str, message: str, exit_code=N
 
 
 def request_execution_stop(execution_id: str, reason: str = "توقف فوری از مرکز اجرای زنده") -> dict:
+    """Mark an execution as stopping and interrupt only its verified owned process tree."""
     _load_execution_registry()
     with _execution_lock:
         row = _execution_records.get(execution_id)
-        if not row or row.get("status") not in _EXECUTION_ACTIVE: return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
-        row.update(status="stopping", stage="termination_started", cancel_requested_at=utc_iso_now(),
+        if not row:
+            return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
+        live_pids = _execution_alive_pids(execution_id)
+        has_unverified_remainders = bool(row.get("remaining_pids"))
+        if row.get("status") not in _EXECUTION_ACTIVE and not live_pids and not has_unverified_remainders:
+            return {"ok": False, "message": "اجرای فعالی با این شناسه نیست."}
+        row.update(status="stopping", stage="termination_started", cancel_requested_at=row.get("cancel_requested_at") or utc_iso_now(),
                    cancel_reason=str(reason)[:500], last_message="درخواست توقف ثبت شد.", updated_at=utc_iso_now())
-        ev = _command_cancel_events.get(execution_id); proc = _process_handles.get(execution_id); _persist_execution_registry()
+        ev = _command_cancel_events.get(execution_id)
+        proc = _process_handles.get(execution_id)
+        if proc is None and row.get("pid") and row.get("process_start_marker") is not None:
+            proc = _RecoveredProcessHandle(int(row["pid"]), row.get("process_start_marker"))
+            _process_handles[execution_id] = proc
+        elif proc is None and row.get("pid"):
+            pid = int(row["pid"])
+            verified_children = [child for child in live_pids if child != pid]
+            if verified_children:
+                # Descendants have their own persisted markers and can be safely stopped; the
+                # unverified root PID will remain an explicit failure in the final result.
+                proc = _RecoveredProcessHandle(pid, None)
+                _process_handles[execution_id] = proc
+            else:
+                msg = f"توقف امن ممکن نیست؛ start marker برای PID {pid} قابل تأیید نبود."
+                row.update(status="termination_failed", stage="termination_failed", remaining_pids=[pid],
+                           error_summary=msg, last_message=msg, updated_at=utc_iso_now())
+        _persist_execution_registry()
     if ev: ev.set()
     if proc:
         threading.Thread(target=_stop_execution_process, args=(execution_id, proc), daemon=True,
@@ -1483,16 +1687,381 @@ def _stop_execution_process(execution_id: str, proc: subprocess.Popen) -> None:
         update_execution(execution_id, status="cancelled", stage="termination_verified", last_message="اجرا و Processهای متعلق به آن متوقف شدند.")
 
 
-def request_stop_all_executions(reason: str = "توقف همه از مرکز اجرای زنده") -> dict:
-    rows = [r for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE]
-    ids = [str(r["execution_id"]) for r in rows]
-    if not ids: return {"ok": True, "count": 0}
-    def batch():
-        threads = [threading.Thread(target=request_execution_stop, args=(eid, reason), daemon=True) for eid in ids]
-        for t in threads: t.start()
-        for t in threads: t.join(timeout=2.5)
-    threading.Thread(target=batch, daemon=True, name="stop-all-executions").start()
-    return {"ok": True, "count": len(ids), "execution_ids": ids}
+def request_stop_all_executions(reason: str = "توقف همه از مرکز اجرای زنده", *, wait: bool = False,
+                                timeout_seconds: float = 12.0) -> dict:
+    """Request stop for all active/straggling owned trees; optionally wait for verified cleanup."""
+    all_rows = get_execution_registry()
+    target_rows = []
+    for row in all_rows:
+        execution_id = str(row.get("execution_id") or "")
+        if not execution_id:
+            continue
+        if row.get("status") in _EXECUTION_ACTIVE or _execution_alive_pids(execution_id) or row.get("remaining_pids"):
+            target_rows.append(row)
+    ids = [str(r["execution_id"]) for r in target_rows]
+    if not wait:
+        if not ids:
+            return {"ok": True, "count": 0, "execution_ids": []}
+        def batch():
+            threads = [threading.Thread(target=request_execution_stop, args=(eid, reason), daemon=True) for eid in ids]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(timeout=2.5)
+        threading.Thread(target=batch, daemon=True, name="stop-all-executions").start()
+        return {"ok": True, "count": len(ids), "execution_ids": ids}
+
+    started = time.monotonic()
+    deadline = started + max(1.0, min(30.0, float(timeout_seconds)))
+    requested_ids = set(ids)
+    stop_threads = []
+    def start_stop_request(execution_id: str) -> None:
+        thread = threading.Thread(target=request_execution_stop, args=(execution_id, reason), daemon=True,
+                                  name=f"stop-all-{execution_id[:16]}")
+        stop_threads.append((execution_id, thread))
+        thread.start()
+    for execution_id in ids: start_stop_request(execution_id)
+    while time.monotonic() < deadline:
+        rows = get_execution_registry()
+        active_rows = [r for r in rows if r.get("status") in _EXECUTION_ACTIVE]
+        alive_by_id = {str(r.get("execution_id")): _execution_alive_pids(str(r.get("execution_id"))) for r in rows}
+        for row in rows:
+            execution_id = str(row.get("execution_id") or "")
+            if execution_id and execution_id not in requested_ids and (row.get("status") in _EXECUTION_ACTIVE or alive_by_id.get(execution_id) or row.get("remaining_pids")):
+                requested_ids.add(execution_id)
+                ids.append(execution_id)
+                start_stop_request(execution_id)
+        remaining = set()
+        for row in rows:
+            owned = {int(x.get("pid")): x.get("start_marker") for x in (row.get("owned_processes") or [])
+                     if isinstance(x, dict) and x.get("pid")}
+            for pid in row.get("remaining_pids") or []:
+                try:
+                    pid = int(pid); marker = owned.get(pid)
+                    if marker is None or _marker_matches(pid, marker): remaining.add(pid)
+                except Exception:
+                    continue
+            live_pids = alive_by_id.get(str(row.get("execution_id")), [])
+            remaining.update(live_pids)
+            if row.get("status") in _EXECUTION_ACTIVE:
+                for item in row.get("owned_processes") or []:
+                    if isinstance(item, dict) and item.get("pid") and item.get("start_marker") is None:
+                        try: remaining.add(int(item["pid"]))
+                        except Exception: pass
+        with _command_lock:
+            claim_pending = bool(_claim_in_progress)
+        with _lock:
+            command_pending = bool(_active_command_id)
+        threads_pending = any(thread.is_alive() for _, thread in stop_threads)
+        if not active_rows and not remaining and not claim_pending and not command_pending and not threads_pending:
+            break
+        time.sleep(0.1)
+
+    rows = get_execution_registry()
+    active_rows = [r for r in rows if r.get("status") in _EXECUTION_ACTIVE]
+    active_ids = sorted({str(r.get("execution_id")) for r in active_rows})
+    remaining = set()
+    remaining_execution_ids = set()
+    live_by_id = {}
+    for row in rows:
+        execution_id = str(row.get("execution_id") or "")
+        live = _execution_alive_pids(execution_id) if execution_id else []
+        live_by_id[execution_id] = live
+        owned = {int(x.get("pid")): x.get("start_marker") for x in (row.get("owned_processes") or [])
+                 if isinstance(x, dict) and x.get("pid")}
+        for pid in row.get("remaining_pids") or []:
+            try:
+                pid = int(pid); marker = owned.get(pid)
+                if marker is None or _marker_matches(pid, marker):
+                    remaining.add(pid)
+                    remaining_execution_ids.add(execution_id)
+            except Exception:
+                continue
+        remaining.update(live)
+        uncertain_pids = []
+        if row.get("status") in _EXECUTION_ACTIVE or row.get("status") == "termination_failed":
+            for item in row.get("owned_processes") or []:
+                if isinstance(item, dict) and item.get("pid") and item.get("start_marker") is None:
+                    try: uncertain_pids.append(int(item["pid"]))
+                    except Exception: pass
+        if uncertain_pids:
+            remaining.update(uncertain_pids)
+            remaining_execution_ids.add(execution_id)
+        if live and execution_id:
+            remaining_execution_ids.add(execution_id)
+            if execution_id not in active_ids:
+                active_ids.append(execution_id)
+        if execution_id in remaining_execution_ids and execution_id not in active_ids:
+            active_ids.append(execution_id)
+    with _command_lock:
+        claim_pending = bool(_claim_in_progress)
+    with _lock:
+        active_command_id = _active_command_id
+    pending_stop_ids = {execution_id for execution_id, thread in stop_threads if thread.is_alive()}
+    for execution_id in pending_stop_ids:
+        if execution_id not in active_ids: active_ids.append(execution_id)
+    if active_command_id and active_command_id not in active_ids:
+        active_ids.append(active_command_id)
+    if claim_pending and not active_ids:
+        active_ids.append("command_claim_in_progress")
+    active_ids = sorted(set(active_ids))
+    verified = not active_rows and not remaining and not claim_pending and not active_command_id and not pending_stop_ids
+    initial_ids = set(ids)
+    stopped = sum(1 for execution_id in initial_ids
+                  if not any(r.get("execution_id") == execution_id and r.get("status") in _EXECUTION_ACTIVE for r in rows)
+                  and not live_by_id.get(execution_id) and execution_id not in remaining_execution_ids)
+    failed = max(0, len(initial_ids) - stopped) + len(set(active_ids) - initial_ids) + len(pending_stop_ids)
+    residual = sorted(remaining) or active_ids
+    message = ("Registry بررسی شد؛ اجرای فعالی وجود ندارد." if verified and not initial_ids else
+               "همه اجراهای متعلق متوقف شدند." if verified else
+               f"توقف کامل انجام نشد؛ اجرای فعال یا PID باقی است: {residual}")
+    return {"ok": verified, "verified": verified, "count": len(ids), "requested": len(ids), "stopped": stopped,
+            "failed": failed, "registryActiveCount": len(active_rows), "activeExecutionIds": active_ids,
+            "remainingPids": sorted(remaining), "execution_ids": ids, "message": message,
+            "durationSeconds": round(time.monotonic() - started, 3)}
+
+
+EMERGENCY_CONTROL_STATE_FILE_NAME = "emergency_control_state.json"
+EMERGENCY_CONTROL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _emergency_state_path() -> Path:
+    return STATE_DIR / EMERGENCY_CONTROL_STATE_FILE_NAME
+
+
+def _read_emergency_state() -> dict:
+    try:
+        value = json.loads(_emergency_state_path().read_text(encoding="utf-8"))
+        if isinstance(value, dict) and isinstance(value.get("controls"), dict):
+            return value
+    except Exception:
+        pass
+    return {"schema": 1, "controls": {}}
+
+
+def _write_emergency_state(state: dict) -> None:
+    try:
+        path = _emergency_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        controls = state.get("controls") if isinstance(state.get("controls"), dict) else {}
+        recent = sorted(controls.items(), key=lambda item: str(item[1].get("updated_at") or ""), reverse=True)[:200]
+        state["controls"] = dict(recent)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _safe_control_fields(control: dict) -> dict:
+    return {
+        "id": str(control.get("id") or "").strip(),
+        "action": str(control.get("action") or "").strip(),
+        "reason": redact_sensitive(str(control.get("reason") or "توقف فوری همه اجراها از سایت مدیریت"), 500),
+        "requestedAt": str(control.get("requestedAt") or "")[:80],
+        "resultEndpoint": str(control.get("resultEndpoint") or "")[:500],
+    }
+
+
+def _set_emergency_status(api, control_id: str, message: str) -> None:
+    with _lock:
+        _runtime_info["emergency_control_id"] = control_id
+        _runtime_info["emergency_control_status"] = message[:240]
+    if api is not None:
+        try:
+            setter = getattr(api, "set_emergency_control_status", None)
+            if callable(setter): setter(message[:240])
+            else: api.log(message[:240])
+        except Exception:
+            pass
+
+
+def _emergency_result_url(base_url: str, control: dict) -> str | None:
+    """Accept only the authenticated Agent API's exact result route for this control ID."""
+    control_id = str(control.get("id") or "")
+    endpoint = str(control.get("resultEndpoint") or "")
+    if not EMERGENCY_CONTROL_ID_RE.fullmatch(control_id) or not endpoint.startswith("/"):
+        return None
+    try:
+        base = urlsplit(base_url)
+        parsed = urlsplit(endpoint)
+        base_path = base.path.rstrip("/")
+        expected_path = f"{base_path}/controls/{control_id}"
+        if (not base.scheme or not base.netloc or parsed.scheme or parsed.netloc or parsed.query or parsed.fragment
+                or parsed.path != expected_path):
+            return None
+        return urlunsplit((base.scheme, base.netloc, parsed.path, "", ""))
+    except Exception:
+        return None
+
+
+def _post_emergency_result(api, cfg: dict, control_id: str) -> bool:
+    with _emergency_lock:
+        state = _read_emergency_state()
+        record = state["controls"].get(control_id)
+        if not isinstance(record, dict) or record.get("status") != "result_pending":
+            return False
+        control = record.get("control") if isinstance(record.get("control"), dict) else {}
+        result_payload = record.get("result") if isinstance(record.get("result"), dict) else {}
+        endpoint_url = _emergency_result_url(cfg.get("base_url", ""), control)
+        record["attempts"] = int(record.get("attempts") or 0) + 1
+        record["last_attempt_at"] = time.time()
+        record["updated_at"] = utc_iso_now()
+        _write_emergency_state(state)
+    if not endpoint_url:
+        _set_emergency_status(api, control_id, "نتیجه توقف به مدیریت ارسال نشد؛ resultEndpoint نامعتبر است.")
+        return False
+    ok, code, response = _http_json("POST", endpoint_url, cfg["agent_key"], result_payload, timeout=HTTP_TIMEOUT)
+    error_obj = response.get("error") if isinstance(response, dict) else None
+    error_code = str(error_obj.get("code") or "") if isinstance(error_obj, dict) else str(error_obj or "")
+    already_accepted = code == 409 and (bool(response.get("alreadyCompleted") or response.get("completed"))
+                                       or error_code in {"control_already_completed", "already_completed", "duplicate_result"})
+    if ok or already_accepted:
+        with _emergency_lock:
+            state = _read_emergency_state()
+            record = state["controls"].get(control_id)
+            if isinstance(record, dict):
+                record.update(status="completed", response_status=code, completed_at=utc_iso_now(), updated_at=utc_iso_now())
+                _write_emergency_state(state)
+        _emergency_control_gate.clear()
+        _set_emergency_status(api, control_id, str((result_payload.get("result") or {}).get("message") or "نتیجه توقف به مدیریت ارسال شد."))
+        return True
+    _set_emergency_status(api, control_id, f"نتیجه توقف ارسال نشد (HTTP {code or 'شبکه'}); ارسال مجدد انجام می‌شود.")
+    return False
+
+
+def _emergency_control_worker(api, cfg: dict, control_id: str, resume_only: bool = False) -> None:
+    try:
+        with _emergency_lock:
+            state = _read_emergency_state()
+            record = state["controls"].get(control_id) or {}
+            control = record.get("control") if isinstance(record.get("control"), dict) else {}
+            has_result = record.get("status") == "result_pending" and isinstance(record.get("result"), dict)
+        if has_result or resume_only:
+            _post_emergency_result(api, cfg, control_id)
+            return
+
+        if control.get("action") != "stop_all_executions":
+            payload = {"status": "failed", "result": {"verified": False, "requested": 0, "stopped": 0,
+                       "failed": 1, "registryActiveCount": len([r for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE]),
+                       "activeExecutionIds": [str(r.get("execution_id")) for r in get_execution_registry() if r.get("status") in _EXECUTION_ACTIVE],
+                       "remainingPids": [], "message": "عملیات اضطراری پشتیبانی نمی‌شود؛ توقفی گزارش نشده است."}}
+            with _emergency_lock:
+                state = _read_emergency_state(); record = state["controls"].get(control_id)
+                if isinstance(record, dict): record.update(status="result_pending", result=payload, updated_at=utc_iso_now()); _write_emergency_state(state)
+            _post_emergency_result(api, cfg, control_id)
+            return
+
+        reason = str(control.get("reason") or "توقف فوری همه اجراها از سایت مدیریت")
+        _set_emergency_status(api, control_id, "درخواست توقف همه از سایت مدیریت دریافت شد")
+        request_local_cancel(reason)
+        if api is not None:
+            try:
+                prepare = getattr(api, "prepare_emergency_stop_all", None)
+                if callable(prepare): prepare(reason, control_id)
+            except Exception:
+                pass
+        _set_emergency_status(api, control_id, "در حال توقف Processهای متعلق…")
+        stop_result = request_stop_all_executions(reason, wait=True, timeout_seconds=15.0)
+        verified = bool(stop_result.get("verified"))
+        result = {
+            "verified": verified,
+            "requested": int(stop_result.get("requested", stop_result.get("count", 0))),
+            "stopped": int(stop_result.get("stopped", 0)),
+            "failed": int(stop_result.get("failed", 0)),
+            "registryActiveCount": int(stop_result.get("registryActiveCount", 0)),
+            "activeExecutionIds": list(stop_result.get("activeExecutionIds") or []),
+            "remainingPids": sorted({int(pid) for pid in (stop_result.get("remainingPids") or []) if str(pid).isdigit()}),
+            "message": str(stop_result.get("message") or ("همه اجراهای متعلق متوقف شدند." if verified else "توقف کامل نشد؛ بررسی دستی لازم است."))[:500],
+        }
+        payload = {"status": "succeeded" if verified else "failed", "result": result}
+        with _emergency_lock:
+            state = _read_emergency_state()
+            record = state["controls"].get(control_id)
+            if isinstance(record, dict):
+                record.update(status="result_pending", result=payload, updated_at=utc_iso_now())
+                _write_emergency_state(state)
+        _set_emergency_status(api, control_id, result["message"] if verified else "توقف کامل نشد؛ بررسی دستی لازم است")
+        _post_emergency_result(api, cfg, control_id)
+    except Exception as exc:
+        try:
+            rows = get_execution_registry()
+            active_rows = [r for r in rows if r.get("status") in _EXECUTION_ACTIVE]
+            remaining = set()
+            for row in rows:
+                remaining.update(_execution_alive_pids(str(row.get("execution_id") or "")))
+                remaining.update(int(pid) for pid in (row.get("remaining_pids") or []) if str(pid).isdigit())
+            payload = {"status": "failed", "result": {"verified": False,
+                       "requested": len(active_rows), "stopped": 0, "failed": max(1, len(active_rows)),
+                       "registryActiveCount": len(active_rows),
+                       "activeExecutionIds": [str(r.get("execution_id")) for r in active_rows],
+                       "remainingPids": sorted(remaining),
+                       "message": f"توقف اضطراری کامل راستی‌آزمایی نشد ({type(exc).__name__})؛ بررسی دستی لازم است."}}
+            with _emergency_lock:
+                state = _read_emergency_state(); record = state["controls"].get(control_id)
+                if isinstance(record, dict): record.update(status="result_pending", result=payload, updated_at=utc_iso_now()); _write_emergency_state(state)
+            _set_emergency_status(api, control_id, payload["result"]["message"])
+            _post_emergency_result(api, cfg, control_id)
+        except Exception:
+            _set_emergency_status(api, control_id, f"خطا در کنترل توقف اضطراری: {type(exc).__name__}")
+    finally:
+        with _emergency_lock:
+            _emergency_control_inflight.discard(control_id)
+
+
+def _queue_emergency_control(api, cfg: dict, raw_control: dict) -> bool:
+    control = _safe_control_fields(raw_control)
+    control_id = control["id"]
+    if not EMERGENCY_CONTROL_ID_RE.fullmatch(control_id):
+        if api is not None:
+            try: api.log("کنترل اضطراری نادیده گرفته شد: Control ID نامعتبر است.")
+            except Exception: pass
+        return False
+    with _emergency_lock:
+        state = _read_emergency_state()
+        records = state["controls"]
+        record = records.get(control_id)
+        if isinstance(record, dict) and record.get("status") == "completed":
+            return False
+        if control_id in _emergency_control_inflight:
+            return False
+        if (isinstance(record, dict) and record.get("status") == "result_pending"
+                and time.time() - float(record.get("last_attempt_at") or 0) < 5.0):
+            return False
+        if not isinstance(record, dict):
+            record = {"control": control, "status": "processing", "created_at": utc_iso_now(), "attempts": 0}
+            records[control_id] = record
+        elif record.get("status") == "result_pending":
+            # Reuse the saved result; never repeat a completed stop operation just to retry its POST.
+            pass
+        else:
+            record["control"] = control
+            record["status"] = "processing"
+            record["updated_at"] = utc_iso_now()
+        state["controls"] = records
+        _write_emergency_state(state)
+        _emergency_control_inflight.add(control_id)
+        _emergency_control_gate.set()
+        resume_only = record.get("status") == "result_pending"
+    thread = threading.Thread(target=_emergency_control_worker, args=(api, dict(cfg), control_id, resume_only),
+                              daemon=True, name=f"emergency-stop-{control_id[:24]}")
+    thread.start()
+    return True
+
+
+def _resume_pending_emergency_controls(api, cfg: dict) -> None:
+    now = time.time()
+    with _emergency_lock:
+        state = _read_emergency_state()
+        pending = [(key, dict(record)) for key, record in state["controls"].items()
+                   if isinstance(record, dict) and record.get("status") in {"processing", "result_pending"}]
+    for control_id, record in pending:
+        last_attempt = float(record.get("last_attempt_at") or 0)
+        if record.get("status") == "result_pending" and now - last_attempt < 5.0:
+            _emergency_control_gate.set()
+            continue
+        control = record.get("control") if isinstance(record.get("control"), dict) else {}
+        if control_id in _emergency_control_inflight:
+            continue
+        _queue_emergency_control(api, cfg, control)
 
 
 def set_confirm_handler(handler) -> None:
@@ -1511,6 +2080,7 @@ def _now_tehran_str(api) -> str:
 
 
 def _set_manager_status(api, connected: bool, note: str, error_msg: str = "") -> None:
+    error_msg = redact_sensitive(error_msg, 500)
     with _lock:
         _runtime_info["last_error"] = error_msg
     if api is not None:
@@ -1544,6 +2114,13 @@ def _refresh_secret_cache(api) -> dict | None:
             _runtime_info["agent_id"] = DEFAULT_AGENT_ID
     if not cfg:
         _set_manager_status(api, False, "در انتظار کلید", "")
+    else:
+        notice = ""
+        with _lock:
+            notice = str(_runtime_info.pop("migration_notice", "") or "")
+        if notice and api is not None:
+            try: api.log(notice)
+            except Exception: pass
     return cfg
 
 
@@ -1562,7 +2139,7 @@ NETWORK_TEST_KEYS = (
 
 
 def _network_report_root() -> Path | None:
-    """Use the app's Google Drive logs folder (or its normal Desktop\\logs fallback)."""
+    """Use the per-user LocalAppData logs folder; Drive is never a new-write target."""
     try:
         import app as _app
         root, _drive_used = _app.resolve_report_dir()
@@ -1699,7 +2276,7 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
     auto_mode = False
     busy = None
     internet = True
-    drive = True
+    drive = False
 
     with _lock:
         active_cmd = _active_command_id
@@ -1713,7 +2290,7 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
             busy = active_cmd or getattr(api, "busy", None)
             st = getattr(api, "status", None) or {}
             internet = bool(st.get("internet", True))
-            drive = bool(st.get("drive", True))
+            drive = False
         except Exception:
             busy = active_cmd
     else:
@@ -1736,7 +2313,11 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
             "open_report": True,
             "telegram_queue": True,
             "command_plane": True,
-            "d1_automations": True,
+            "database_automations": True,
+            "d1_automations": True,  # transitional alias for older management deployments
+            "vercel_blob_screenshot_upload": True,
+            "google_drive_artifacts": False,
+            "emergency_stop_all": True,
             # OCR تا پس از نصب/گرم‌سازی و self-test آفلاین واقعی true نمی‌شود.
             "arena_vision_ocr": vision_ready,
             "network_resilience": network_ready,
@@ -1744,6 +2325,7 @@ def _build_heartbeat_payload(api, agent_id: str) -> dict:
             "ocr_local_only": True,
         },
         "state": {
+            "manager_base": "vercel",
             "auto_mode": auto_mode,
             "busy": busy,
             "internet": internet,
@@ -1769,6 +2351,20 @@ def _extract_error_code(data: dict) -> str:
     if isinstance(err, dict):
         return str(err.get("code") or "")
     return ""
+
+
+def _handle_auth_response(api, code: int, operation: str, required_scope: str) -> None:
+    global _auth_blocked_until
+    if code not in (401, 403): return
+    if code == 401:
+        _auth_blocked_until = max(_auth_blocked_until, time.monotonic() + 60.0)
+    else:
+        _auth_blocked_operations[operation] = time.monotonic() + 60.0
+    status = "کلید نامعتبر" if code == 401 else "دسترسی ناکافی"
+    _set_manager_status(api, False, status, f"HTTP {code}")
+    if code == 403 and api is not None:
+        try: api.log(f"عملیات {operation} رد شد؛ Scope لازم: {required_scope} (HTTP 403).")
+        except Exception: pass
 
 
 def send_heartbeat_once(api, cfg: dict | None = None) -> tuple[bool, int, dict]:
@@ -1806,12 +2402,16 @@ def send_heartbeat_once(api, cfg: dict | None = None) -> tuple[bool, int, dict]:
             _runtime_info["last_heartbeat_at"] = stamp
             _runtime_info["last_error"] = ""
         _set_manager_status(api, True, "وصل", "")
+        control = data.get("emergencyControl") if isinstance(data, dict) else None
+        if not isinstance(control, dict) and isinstance(data, dict) and isinstance(data.get("data"), dict):
+            control = data["data"].get("emergencyControl")
+        if isinstance(control, dict):
+            _queue_emergency_control(api, cfg, control)
         return True, code, data
 
-    if code == 401:
-        _set_manager_status(api, False, "کلید نامعتبر", _extract_error_message(data, code))
-    elif code == 403:
-        _set_manager_status(api, False, "دسترسی ناکافی", _extract_error_message(data, code))
+    if code in (401, 403):
+        _handle_auth_response(api, code, "heartbeat", "heartbeat:write")
+        _set_manager_status(api, False, "کلید نامعتبر" if code == 401 else "دسترسی ناکافی", _extract_error_message(data, code))
     else:
         _set_manager_status(api, False, "قطع", _extract_error_message(data, code))
     return False, code, data
@@ -1828,10 +2428,9 @@ def poll_connection_test_once(api, cfg: dict | None = None) -> tuple[bool, int, 
 
     ok, code, data = _http_json("GET", f"{base_url}/connection-test", agent_key, None, timeout=HTTP_TIMEOUT)
     if not ok:
-        if code == 401:
-            _set_manager_status(api, False, "کلید نامعتبر", _extract_error_message(data, code))
-        elif code == 403:
-            _set_manager_status(api, False, "دسترسی ناکافی", _extract_error_message(data, code))
+        if code in (401, 403):
+            _handle_auth_response(api, code, "connection-test", "heartbeat:write")
+            _set_manager_status(api, False, "کلید نامعتبر" if code == 401 else "دسترسی ناکافی", _extract_error_message(data, code))
         else:
             _set_manager_status(api, False, "قطع", _extract_error_message(data, code))
         return False, code, data
@@ -1878,19 +2477,23 @@ def poll_connection_test_once(api, cfg: dict | None = None) -> tuple[bool, int, 
                 pass
         return ok_post, code_post, data_post
 
-    if code_post == 401:
-        _set_manager_status(api, False, "کلید نامعتبر", _extract_error_message(data_post, code_post))
-    elif code_post == 403:
-        _set_manager_status(api, False, "دسترسی ناکافی", _extract_error_message(data_post, code_post))
+    if code_post in (401, 403):
+        _handle_auth_response(api, code_post, "connection-test", "heartbeat:write")
+        _set_manager_status(api, False, "کلید نامعتبر" if code_post == 401 else "دسترسی ناکافی",
+                            _extract_error_message(data_post, code_post))
     return False, code_post, data_post
 
 
 # ------------------------------------ API صف فرمان و پایش زنده (Command Plane) ---
 
 def _save_active_command_marker(cmd_id: str, pid: int | None, start_marker: float | None, job_name: str, seq: int,
-                                stage: str = "running", workspace_path: str = "", cancel_requested: bool = False) -> None:
+                                stage: str = "running", workspace_path: str = "", cancel_requested: bool = False,
+                                owned_processes: list[dict] | None = None) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if owned_processes is None:
+            row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+            owned_processes = row.get("owned_processes") or []
         payload = {
             "command_id": cmd_id,
             "pid": pid,
@@ -1899,6 +2502,7 @@ def _save_active_command_marker(cmd_id: str, pid: int | None, start_marker: floa
             "seq": seq,
             "stage": stage,
             "workspace_path": workspace_path,
+            "owned_processes": owned_processes,
             "cancel_requested": bool(cancel_requested),
             "saved_at": utc_iso_now(),
         }
@@ -1939,7 +2543,15 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         _clear_active_command_marker()
         return
 
-    if pid > 0 and marker is not None and _marker_matches(pid, marker):
+    old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+    owned_records = []
+    for item in (old_row.get("owned_processes") or []) + (info.get("owned_processes") or []):
+        if isinstance(item, dict) and item.get("pid") and item.get("start_marker") is not None:
+            if not any(int(old.get("pid", -1)) == int(item["pid"]) and old.get("start_marker") == item.get("start_marker") for old in owned_records):
+                owned_records.append(dict(item))
+    root_alive = pid > 0 and marker is not None and _marker_matches(pid, marker)
+    owned_alive = [item for item in owned_records if _marker_matches(int(item["pid"]), item.get("start_marker"))]
+    if pid > 0 and (root_alive or owned_alive):
         recovered = _RecoveredProcessHandle(pid, marker)
         with _lock:
             global _active_command_id
@@ -1950,12 +2562,14 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         try:
             api.busy = f"بازیابی اجرای باقی‌مانده ({cmd_id})"
         except Exception: pass
-        old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+        if root_alive and not any(int(item["pid"]) == pid for item in owned_records):
+            owned_records.append({"pid": pid, "parent_pid": old_row.get("parent_pid"), "start_marker": marker})
         register_execution(cmd_id, old_row.get("title") or info.get("job_name") or "اجرای بازیابی‌شده",
                            old_row.get("source") or "فرمان مدیریتی", old_row.get("execution_mode") or "foreground",
                            command_id=cmd_id, status="running", stage="recovery_required", pid=pid,
                            parent_pid=old_row.get("parent_pid"), process_start_marker=marker,
-                           owned_processes=old_row.get("owned_processes") or [{"pid": pid, "parent_pid": old_row.get("parent_pid"), "start_marker": marker}],
+                           owned_processes=owned_records,
+                           child_pids=[int(item["pid"]) for item in owned_records if int(item["pid"]) != pid],
                            workspace_path=info.get("workspace_path", ""), last_message="بازیابی اجرای باقی‌مانده پس از Restart")
         with _execution_lock: _process_handles[cmd_id] = recovered
         if info.get("cancel_requested") or old_row.get("cancel_requested_at"):
@@ -1966,22 +2580,26 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
 
     base_url = cfg["base_url"]
     agent_key = cfg["agent_key"]
-    previous = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+    previous = old_row
     was_cancelled = bool(info.get("cancel_requested") or previous.get("cancel_requested_at"))
-    final_status = "cancelled" if was_cancelled else "failed"
-    msg = ("فرمان در مرحله آماده‌سازی/توقف پیش از اجرای Process و پس از Restart reconcile شد."
-           if was_cancelled else "فرآیند اجرای فرمان پس از راه‌اندازی مجدد Windows Agent زنده نبود؛ نتیجه اجرا نامعلوم است.")
+    unverified_pid = bool(pid > 0 and marker is None)
+    final_status = "termination_failed" if unverified_pid else ("cancelled" if was_cancelled else "failed")
+    msg = (f"توقف پس از Restart قابل تأیید نیست؛ start marker برای PID {pid} موجود نیست."
+           if unverified_pid else ("فرمان پیش از شروع Process یا پس از توقف تأییدشده reconcile شد."
+           if was_cancelled else "فرآیند اجرای فرمان پس از راه‌اندازی مجدد Windows Agent زنده نبود؛ نتیجه اجرا نامعلوم است."))
+    remaining_after_restart = [pid] if unverified_pid else []
+    final_stage = "termination_failed" if unverified_pid else ("cancelled" if was_cancelled else "crash_recovery")
     _http_json(
         "POST",
         f"{base_url}/commands/{cmd_id}/events",
         agent_key,
         {
             "seq": seq,
-            "stage": "cancelled" if was_cancelled else "crash_recovery",
-            "level": "warning" if was_cancelled else "fatal",
+            "stage": final_stage,
+            "level": "fatal" if unverified_pid or not was_cancelled else "warning",
             "message": msg,
             "occurredAt": utc_iso_now(),
-            "data": {"commandId": cmd_id, "pid": pid or None, "reason": msg, "remainingPids": [], "autoStop": True},
+            "data": {"commandId": cmd_id, "pid": pid or None, "reason": msg, "remainingPids": remaining_after_restart, "autoStop": True},
         },
         timeout=HTTP_TIMEOUT,
     )
@@ -1990,18 +2608,20 @@ def recover_stale_command_if_any(api, cfg: dict | None = None) -> None:
         f"{base_url}/commands/{cmd_id}",
         agent_key,
         {
-            "status": final_status,
+            "status": "failed" if final_status == "termination_failed" else final_status,
             "seq": seq + 1,
-            "stage": "cancelled" if was_cancelled else "crash_recovery",
+            "stage": final_stage,
             "message": msg,
-            "error": None if was_cancelled else msg,
-            "result": {"recoveredAfterRestart": True, "pid": pid or None, "terminationVerified": True, "remainingPids": []},
+            "error": None if final_status == "cancelled" else msg,
+            "result": {"recoveredAfterRestart": True, "pid": pid or None,
+                       "terminationVerified": not unverified_pid, "remainingPids": remaining_after_restart},
         },
         timeout=HTTP_TIMEOUT,
     )
     _clear_active_command_marker()
-    update_execution(cmd_id, status=final_status, stage="cancelled" if was_cancelled else "crash_recovery",
-                     last_message=msg, remaining_pids=[])
+    update_execution(cmd_id, status=final_status, stage=final_stage,
+                     last_message=msg, remaining_pids=remaining_after_restart,
+                     error_summary=msg if unverified_pid else "")
     workspace = Path(str(info.get("workspace_path") or ""))
     try:
         workspace_resolved = workspace.resolve()
@@ -2020,13 +2640,11 @@ def _monitor_recovered_command(api, cfg: dict, marker_info: dict, proc: _Recover
     requested_at = time.monotonic() if cancel_requested else None
     stop_failure_reported = False
     while True:
-        root_alive = _marker_matches(proc.pid, proc.marker)
         row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
         owned = list(row.get("owned_processes") or [])
-        if root_alive:
-            owned = [{"pid": proc.pid, "parent_pid": row.get("parent_pid"), "start_marker": proc.marker}] + [
-                x for x in _owned_descendants(proc.pid) if x.get("start_marker") is not None]
-            update_execution(cmd_id, owned_processes=owned, child_pids=[int(x["pid"]) for x in owned if int(x["pid"]) != proc.pid])
+        snapshot_execution_tree(cmd_id, proc.pid, proc.marker)
+        row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), row)
+        owned = list(row.get("owned_processes") or [])
         alive = [x for x in owned if x.get("start_marker") is not None and _marker_matches(int(x["pid"]), x.get("start_marker"))]
         if not cancel_requested and time.monotonic() >= getattr(_monitor_recovered_command, "next_poll", 0.0):
             _monitor_recovered_command.next_poll = time.monotonic() + 1.0
@@ -2043,20 +2661,27 @@ def _monitor_recovered_command(api, cfg: dict, marker_info: dict, proc: _Recover
         if cancel_requested and alive:
             _terminate_execution_tree(cmd_id, proc, 1.5)
         if not alive:
-            final_status = "cancelled" if cancel_requested else "failed"
-            message = ("Processهای اجرای باقی‌مانده پس از Restart متوقف و تأیید شدند." if cancel_requested else
-                       "فرآیند پس از Restart دیگر فعال نبود؛ نتیجه اجرای کامل نامعلوم است و فرمان به‌عنوان ناموفق reconcile شد.")
+            unverified_root = proc.marker is None
+            final_status = "termination_failed" if unverified_root else ("cancelled" if cancel_requested else "failed")
+            message = (f"توقف پس از Restart قابل تأیید نیست؛ start marker برای PID {proc.pid} موجود نیست."
+                       if unverified_root else ("Processهای اجرای باقی‌مانده پس از Restart متوقف و تأیید شدند." if cancel_requested else
+                       "فرآیند پس از Restart دیگر فعال نبود؛ نتیجه اجرای کامل نامعلوم است و فرمان به‌عنوان ناموفق reconcile شد."))
+            final_stage = "termination_failed" if unverified_root else ("cancelled" if cancel_requested else "crash_recovery")
+            remaining_recovered = [proc.pid] if unverified_root else []
             _http_json("POST", f"{base}/commands/{cmd_id}/events", key,
-                       {"seq": seq, "stage": "termination_verified" if cancel_requested else "crash_recovery",
-                        "level": "warning" if cancel_requested else "fatal", "message": message,
+                       {"seq": seq, "stage": final_stage,
+                        "level": "fatal" if unverified_root or not cancel_requested else "warning", "message": message,
                         "occurredAt": utc_iso_now(), "data": {"commandId": cmd_id, "pid": proc.pid,
                         "childPids": [int(x["pid"]) for x in owned if int(x["pid"]) != proc.pid],
-                        "reason": cancel_reason if cancel_requested else message, "remainingPids": [], "recoveredAfterRestart": True}}, timeout=HTTP_TIMEOUT)
+                        "reason": cancel_reason if cancel_requested else message, "remainingPids": remaining_recovered, "recoveredAfterRestart": True}}, timeout=HTTP_TIMEOUT)
             _http_json("POST", f"{base}/commands/{cmd_id}", key,
-                       {"status": final_status, "seq": seq + 1, "stage": "cancelled" if cancel_requested else "crash_recovery",
-                        "message": message, "error": None if cancel_requested else message,
-                        "result": {"recoveredAfterRestart": True, "pid": proc.pid, "terminationVerified": True}}, timeout=HTTP_TIMEOUT)
-            update_execution(cmd_id, status=final_status, stage=final_status, last_message=message, remaining_pids=[])
+                       {"status": "failed" if final_status == "termination_failed" else final_status,
+                        "seq": seq + 1, "stage": final_stage,
+                        "message": message, "error": None if final_status == "cancelled" else message,
+                        "result": {"recoveredAfterRestart": True, "pid": proc.pid,
+                                   "terminationVerified": not unverified_root, "remainingPids": remaining_recovered}}, timeout=HTTP_TIMEOUT)
+            update_execution(cmd_id, status=final_status, stage=final_stage, last_message=message,
+                             remaining_pids=remaining_recovered, error_summary=message if unverified_root else "")
             _clear_active_command_marker()
             with _execution_lock: _process_handles.pop(cmd_id, None)
             with _lock:
@@ -2078,6 +2703,325 @@ def _monitor_recovered_command(api, cfg: dict, marker_info: dict, proc: _Recover
         time.sleep(0.25)
 
 
+# ------------------------------------ صف پایدار Upload Screenshot به Vercel ---
+
+def _atomic_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with temp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.flush(); os.fsync(handle.fileno())
+    temp.replace(path)
+
+
+def _normalize_screenshot(path: Path, target_bytes: int = SCREENSHOT_SAFE_MAX_BYTES) -> tuple[Path, int, int]:
+    from PIL import Image
+    path = Path(path)
+    with Image.open(path) as opened:
+        image = opened.convert("RGB")
+    width, height = image.size
+    png = path.with_suffix(".png")
+    image.save(png, format="PNG", optimize=True)
+    if png.stat().st_size <= target_bytes:
+        if png != path:
+            try: path.unlink()
+            except OSError: pass
+        return png, width, height
+    current = image
+    quality = 90
+    for _ in range(16):
+        jpg = path.with_suffix(".jpg")
+        current.save(jpg, format="JPEG", quality=quality, optimize=True, progressive=True)
+        if jpg.stat().st_size <= target_bytes:
+            if path != jpg:
+                try: path.unlink()
+                except OSError: pass
+            try: png.unlink()
+            except OSError: pass
+            return jpg, current.width, current.height
+        if quality > 66:
+            quality -= 8
+        else:
+            quality = 82
+            new_size = (min(current.width, max(640, int(current.width * 0.86))),
+                        min(current.height, max(480, int(current.height * 0.86))))
+            if new_size == current.size: break
+            current = current.resize(new_size, getattr(Image, "Resampling", Image).LANCZOS)
+    raise ValueError("تصویر پس از فشرده‌سازی خوانا همچنان از سقف Upload بزرگ‌تر است.")
+
+
+def _screenshot_manifest_files() -> list[Path]:
+    try: return list(SCREENSHOT_MANIFEST_DIR.glob("*.json"))
+    except OSError: return []
+
+
+def _screenshot_report_event(job: dict, stage: str, message: str, level: str = "info", extra: dict | None = None) -> None:
+    command_id = str(job.get("commandId") or "")
+    api = _api_ref
+    with _screenshot_upload_lock:
+        session = _command_sessions.get(command_id)
+    payload = {"commandId": command_id, "executionId": job.get("executionId"),
+               "stage": job.get("stage"), "attempt": int(job.get("attempts") or 0),
+               "sha256Short": str(job.get("sha256") or "")[:12], **(extra or {})}
+    if session is not None:
+        try: session.emit_event(stage, message, level=level, data=payload)
+        except Exception: pass
+    elif command_id:
+        # After a restart, sequence is recovered from the local execution registry rather than lost.
+        cfg = load_secret()
+        if cfg:
+            seq = allocate_execution_event_seq(command_id)
+            body = {"seq": seq, "stage": stage, "level": level if level in ("debug", "info", "warning", "error", "fatal") else "info",
+                    "message": redact_sensitive(message, 1900), "occurredAt": utc_iso_now(), "data": payload}
+            ok, code, _ = _http_json("POST", f"{cfg['base_url']}/commands/{command_id}/events",
+                                     cfg["agent_key"], body, timeout=HTTP_TIMEOUT)
+            if code in (401, 403): _handle_auth_response(api, code, "commands/{commandId}/events", "events:write")
+    if api is not None and level in ("warning", "error", "fatal"):
+        try: api.log(f"Screenshot {stage}: {message} — commandId={command_id} attempt={payload['attempt']}")
+        except Exception: pass
+
+
+def _async_screenshot_report_event(*args, **kwargs) -> None:
+    threading.Thread(target=_screenshot_report_event, args=args, kwargs=kwargs,
+                     name="screenshot-stage-event", daemon=True).start()
+
+
+def _enqueue_screenshot(path: Path, command_id: str, execution_id: str, agent_id: str,
+                        stage: str, name: str, occurred_at: str, width: int, height: int) -> dict:
+    path = Path(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    key = hashlib.sha256(f"{agent_id}|{command_id}|{stage}|{digest}".encode()).hexdigest()
+    for manifest_path in _screenshot_manifest_files():
+        try:
+            old = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if old.get("dedupeKey") == key:
+                if old.get("status") == "succeeded":
+                    return {"queued": False, "duplicate": True, "screenshotId": old.get("screenshotId"), "sha256": digest}
+                if old.get("status") in ("queued", "retry", "uploading", "auth_blocked"):
+                    return {"queued": True, "duplicate": True, "sha256": digest}
+        except (OSError, ValueError): continue
+    SCREENSHOT_MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    job_id = uuid.uuid4().hex
+    dest_dir = SCREENSHOT_QUEUE_DIR / re.sub(r"[^A-Za-z0-9_-]", "_", execution_id or command_id)[:80]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{job_id}{path.suffix.lower()}"
+    if path.resolve() != dest.resolve(): shutil.copyfile(path, dest)
+    try:
+        if path.resolve() != dest.resolve(): path.unlink()
+    except OSError: pass
+    job = {"jobId": job_id, "dedupeKey": key, "commandId": command_id, "executionId": execution_id,
+           "agentId": agent_id, "stage": stage, "name": name, "occurredAt": occurred_at,
+           "width": int(width), "height": int(height), "file": str(dest), "sha256": digest,
+           "size": dest.stat().st_size, "attempts": 0, "nextAttemptAt": 0,
+           "status": "queued", "createdAt": utc_iso_now(), "resizeRetried": False}
+    _atomic_json(SCREENSHOT_MANIFEST_DIR / f"{job_id}.json", job)
+    _set_screenshot_queue_status("queued", f"Screenshot مرحله {stage} در صف محلی است.")
+    _screenshot_upload_wake.set()
+    return {"queued": True, "duplicate": False, "sha256": digest, "size": job["size"]}
+
+
+def _set_screenshot_queue_status(status: str, message: str) -> None:
+    with _lock:
+        _runtime_info["screenshot_upload_status"] = status
+        _runtime_info["screenshot_upload_message"] = message[:240]
+
+
+def _screenshot_upload_once(job: dict, cfg: dict) -> tuple[int, dict]:
+    fields = {"commandId": job["commandId"], "executionId": job["executionId"], "agentId": job["agentId"],
+              "stage": job["stage"], "name": job["name"], "occurredAt": job["occurredAt"],
+              "width": job["width"], "height": job["height"]}
+    return _http_multipart_file(f"{cfg['base_url']}{SCREENSHOT_UPLOAD_URL}", cfg["agent_key"], fields,
+                                Path(job["file"]), timeout=HTTP_TIMEOUT)
+
+
+def _process_screenshot_job(manifest_path: Path, api=None) -> None:
+    global _screenshot_auth_blocked_key
+    try: job = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError): return
+    if job.get("status") not in ("queued", "retry", "uploading", "auth_blocked") or float(job.get("nextAttemptAt") or 0) > time.time(): return
+    if _stop_event.is_set(): return
+    path = Path(str(job.get("file") or ""))
+    if not path.is_file():
+        job.update(status="failed_permanent", errorCode="local_file_missing")
+        _atomic_json(manifest_path, job)
+        _screenshot_report_event(job, "screenshot_upload_failed_permanent", "فایل صف Upload محلی پیدا نشد.", "error")
+        return
+    cfg = load_secret()
+    if not cfg: return
+    key_fingerprint = hashlib.sha256(cfg["agent_key"].encode("utf-8")).hexdigest()
+    if path.stat().st_size > SCREENSHOT_UPLOAD_MAX_BYTES and not job.get("resizeRetried"):
+        try:
+            reduced, w, h = _normalize_screenshot(path, target_bytes=SCREENSHOT_SAFE_MAX_BYTES)
+            job.update(file=str(reduced), width=w, height=h, size=reduced.stat().st_size,
+                       sha256=hashlib.sha256(reduced.read_bytes()).hexdigest(), resizeRetried=True)
+            _atomic_json(manifest_path, job)
+            path = reduced
+        except Exception:
+            job.update(status="failed_permanent", errorCode="local_size_limit", completedAt=utc_iso_now())
+            _atomic_json(manifest_path, job)
+            _screenshot_report_event(job, "screenshot_upload_failed_permanent", "فایل از سقف ۴ MiB کوچک نشد.", "error",
+                                     {"httpStatus": 413, "retryable": False})
+            return
+    if path.stat().st_size > SCREENSHOT_UPLOAD_MAX_BYTES:
+        job.update(status="failed_permanent", errorCode="local_size_limit", completedAt=utc_iso_now())
+        _atomic_json(manifest_path, job)
+        _screenshot_report_event(job, "screenshot_upload_failed_permanent", "فایل از سقف ۴ MiB بزرگ‌تر است؛ retry انجام نشد.", "error",
+                                 {"httpStatus": 413, "retryable": False})
+        return
+    if job.get("status") == "auth_blocked":
+        if job.get("authKeyFingerprint") == key_fingerprint: return
+        job["status"] = "queued"
+    if _screenshot_auth_blocked_key == key_fingerprint:
+        job.update(status="auth_blocked", authKeyFingerprint=key_fingerprint)
+        _atomic_json(manifest_path, job)
+        return
+    job["attempts"] = int(job.get("attempts") or 0) + 1
+    job["status"] = "uploading"
+    _atomic_json(manifest_path, job)
+    _set_screenshot_queue_status("uploading", f"در حال Upload مرحله {job.get('stage')}")
+    _screenshot_report_event(job, "screenshot_upload_started", "ارسال Screenshot به API مدیریت آغاز شد.",
+                             extra={"size": path.stat().st_size})
+    code, response = _screenshot_upload_once(job, cfg)
+    if code == 413 and not job.get("resizeRetried"):
+        try:
+            reduced, w, h = _normalize_screenshot(path, target_bytes=2_800_000)
+            job.update(file=str(reduced), width=w, height=h, size=reduced.stat().st_size,
+                       sha256=hashlib.sha256(reduced.read_bytes()).hexdigest(), resizeRetried=True)
+            _atomic_json(manifest_path, job)
+            _screenshot_report_event(job, "screenshot_normalized", "پاسخ 413؛ تصویر یک‌بار کوچک‌تر شد.", "warning",
+                                     {"size": job["size"], "sha256Short": job["sha256"][:12]})
+            job["attempts"] = int(job.get("attempts") or 0) + 1
+            _atomic_json(manifest_path, job)
+            code, response = _screenshot_upload_once(job, cfg)
+        except Exception: pass
+    screenshot = response.get("screenshot") if isinstance(response, dict) else None
+    screenshot = screenshot if isinstance(screenshot, dict) else {}
+    screenshot_id = str(screenshot.get("id") or "")
+    content_url = str(screenshot.get("contentUrl") or "")
+    try:
+        parsed_content = urlsplit(content_url)
+        valid_content = (not parsed_content.scheme and not parsed_content.netloc and not parsed_content.query
+                         and not parsed_content.fragment and parsed_content.path.startswith("/api/screenshots/"))
+    except ValueError:
+        valid_content = False
+    if code == 201 and isinstance(response, dict) and response.get("ok") is True and screenshot_id and valid_content:
+        job.update(status="succeeded", screenshotId=screenshot_id, contentUrl=content_url,
+                   completedAt=utc_iso_now(), httpStatus=201)
+        _atomic_json(manifest_path, job)
+        try: Path(job["file"]).unlink()
+        except OSError: pass
+        _set_screenshot_queue_status("succeeded", f"Screenshot {screenshot_id} بارگذاری شد.")
+        _screenshot_report_event(job, "screenshot_upload_succeeded", "Screenshot با پاسخ HTTP 201 ثبت شد.",
+                                 extra={"screenshotId": screenshot_id, "contentUrl": content_url, "size": job.get("size")})
+        return
+    error_obj = response.get("error") if isinstance(response, dict) else None
+    error_code = str(error_obj.get("code") if isinstance(error_obj, dict) else (error_obj or ""))[:100]
+    if code in (401, 403):
+        note = "کلید نامعتبر" if code == 401 else "دسترسی ناکافی"
+        _set_manager_status(api, False, note, f"Screenshot upload HTTP {code}")
+        _handle_auth_response(api, code, "screenshots", "artifacts:write")
+        _screenshot_auth_blocked_key = key_fingerprint
+        if code == 401: _mark_agent_key_invalid(cfg["agent_key"])
+        _screenshot_report_event(job, "screenshot_upload_failed_permanent",
+                                 f"Upload Screenshot رد شد؛ HTTP {code}، عملیات screenshots، Scope لازم: artifacts:write.", "error",
+                                 {"httpStatus": code, "errorCode": error_code, "retryable": False, "requiredScope": "artifacts:write"})
+        job.update(status="auth_blocked", authKeyFingerprint=key_fingerprint,
+                   httpStatus=code, errorCode=error_code, completedAt=utc_iso_now())
+        _atomic_json(manifest_path, job)
+        return
+    if code and code < 500 and code != 429:
+        job.update(status="failed_permanent", httpStatus=code, errorCode=error_code or "request_rejected", completedAt=utc_iso_now())
+        _atomic_json(manifest_path, job)
+        _set_screenshot_queue_status("failed", f"Upload دائمی رد شد (HTTP {code}).")
+        _screenshot_report_event(job, "screenshot_upload_failed_permanent", f"Upload دائمی رد شد؛ HTTP {code}.", "error",
+                                 {"httpStatus": code, "errorCode": error_code, "retryable": False})
+        return
+    attempt = int(job["attempts"])
+    delay = SCREENSHOT_RETRY_STEPS[min(attempt - 1, len(SCREENSHOT_RETRY_STEPS) - 1)]
+    retry_at = time.time() + delay
+    job.update(status="retry", nextAttemptAt=retry_at, httpStatus=code or None, errorCode=error_code or "network_error")
+    _atomic_json(manifest_path, job)
+    retry_local = datetime.fromtimestamp(retry_at, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    _set_screenshot_queue_status("retry", f"تلاش بعدی تا {delay:g} ثانیه دیگر")
+    _screenshot_report_event(job, "screenshot_upload_retry_scheduled", f"Upload موقت ناموفق؛ تلاش بعدی در {retry_local}.", "warning",
+                             {"httpStatus": code or None, "errorCode": error_code or "network_error", "retryable": True,
+                              "retryAt": retry_local, "delaySeconds": delay})
+
+
+def _recover_uploading_screenshot_jobs() -> None:
+    SCREENSHOT_MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    for manifest in _screenshot_manifest_files():
+        try:
+            job = json.loads(manifest.read_text(encoding="utf-8"))
+            if job.get("status") == "uploading":
+                job["status"] = "queued"  # API deduplicates by Agent, command, stage, and SHA-256.
+                job["nextAttemptAt"] = 0
+                _atomic_json(manifest, job)
+        except (OSError, ValueError): pass
+
+
+def _screenshot_upload_loop() -> None:
+    _recover_uploading_screenshot_jobs()
+    while not _stop_event.is_set():
+        for manifest in _screenshot_manifest_files():
+            if _stop_event.is_set(): break
+            try:
+                job = json.loads(manifest.read_text(encoding="utf-8"))
+                if job.get("status") in ("queued", "retry", "uploading", "auth_blocked") and float(job.get("nextAttemptAt") or 0) <= time.time():
+                    _process_screenshot_job(manifest, _api_ref)
+                    try:
+                        updated = json.loads(manifest.read_text(encoding="utf-8"))
+                        _cleanup_screenshot_session(str(updated.get("commandId") or ""))
+                    except (OSError, ValueError): pass
+            except (OSError, ValueError, TypeError): continue
+        # Always yield, including when a queued item has no configured key, to avoid a busy loop.
+        _screenshot_upload_wake.wait(0.5)
+        _screenshot_upload_wake.clear()
+
+
+def _start_screenshot_upload_worker() -> None:
+    global _screenshot_upload_thread
+    with _screenshot_upload_lock:
+        if _screenshot_upload_thread is not None and _screenshot_upload_thread.is_alive(): return
+        _screenshot_upload_thread = threading.Thread(target=_screenshot_upload_loop,
+            name="manager-screenshot-upload", daemon=True)
+        _screenshot_upload_thread.start()
+
+
+def _cleanup_screenshot_session(command_id: str) -> None:
+    with _screenshot_upload_lock:
+        session = _command_sessions.get(command_id)
+    if session is None or not getattr(session, "finished", False): return
+    for manifest in _screenshot_manifest_files():
+        try:
+            job = json.loads(manifest.read_text(encoding="utf-8"))
+            if job.get("commandId") == command_id and job.get("status") in ("queued", "retry", "uploading"):
+                return
+        except (OSError, ValueError): pass
+    with _screenshot_upload_lock:
+        _command_sessions.pop(command_id, None)
+
+
+def _cancel_screenshot_uploads(command_id: str) -> None:
+    for manifest in _screenshot_manifest_files():
+        try:
+            job = json.loads(manifest.read_text(encoding="utf-8"))
+            if job.get("commandId") == command_id and job.get("status") in ("queued", "retry", "auth_blocked"):
+                job.update(status="cancelled", completedAt=utc_iso_now())
+                _atomic_json(manifest, job)
+                try: Path(job.get("file") or "").unlink()
+                except OSError: pass
+        except (OSError, ValueError): pass
+    _screenshot_upload_wake.set()
+
+
+def _serialize_session_event(method):
+    def wrapped(self, *args, **kwargs):
+        with self._event_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class _CommandSession:
     """مدیریت چرخه‌ی کامل یک فرمان دریافتی از ایجنت مدیریت."""
 
@@ -2094,6 +3038,9 @@ class _CommandSession:
         self.auto_stop_on_anomaly = bool(cmd.get("autoStopOnAnomaly", True))
         self.requires_confirmation = bool(cmd.get("requiresConfirmation", True))
         self.seq = 1
+        self._event_lock = threading.RLock()
+        with _screenshot_upload_lock:
+            _command_sessions[self.cmd_id] = self
         self.job_name = ""
         self.pid: int | None = None
         self.process_start_marker: float | None = None
@@ -2116,12 +3063,15 @@ class _CommandSession:
         self._registry_stage = "claimed"
 
     def next_seq(self) -> int:
-        self.seq = min(999_999, self.seq + 1)
-        return self.seq
+        with self._event_lock:
+            self.seq = min(999_999, self.seq + 1)
+            update_execution(self.cmd_id, event_seq=self.seq)
+            return self.seq
 
     def mark_progress(self) -> None:
         self.last_progress_mono = time.monotonic()
 
+    @_serialize_session_event
     def emit_event(
         self,
         stage: str,
@@ -2131,6 +3081,9 @@ class _CommandSession:
         take_shot: bool = False,
     ) -> bool:
         """ثبت یک رخداد مرحله‌ای در ``POST /commands/{id}/events`` و در صورت نیاز گرفتن اسکرین‌شات."""
+        # Capture the real visual state before announcing the observable stage; upload stays async.
+        if take_shot or stage in OBSERVABLE_SCREENSHOT_STAGES:
+            self.capture_stage_screenshot(stage)
         seq = self.next_seq()
         self.emitted_stages.add(stage)
         self.mark_progress()
@@ -2146,7 +3099,7 @@ class _CommandSession:
             "occurredAt": utc_iso_now(),
             "data": safe_data,
         }
-        ok, _, resp = _http_json(
+        ok, code, resp = _http_json(
             "POST",
             f"{self.base_url}/commands/{self.cmd_id}/events",
             self.agent_key,
@@ -2155,13 +3108,13 @@ class _CommandSession:
         )
         if ok and isinstance(resp, dict) and resp.get("cancelRequested"):
             self.cancel_requested = True
-
-        if take_shot or stage in OBSERVABLE_SCREENSHOT_STAGES:
-            self.capture_stage_screenshot(stage)
+        elif code in (401, 403):
+            _handle_auth_response(self.api, code, "commands/{commandId}/events", "events:write")
 
         self.checkpoint(stage)
         return ok
 
+    @_serialize_session_event
     def update_state(
         self,
         status: str,
@@ -2189,13 +3142,16 @@ class _CommandSession:
             body["error"] = redact_sensitive(error, 3800)
         if result is not None:
             body["result"] = result
-        return _http_json(
+        response = _http_json(
             "POST",
             f"{self.base_url}/commands/{self.cmd_id}",
             self.agent_key,
             body,
             timeout=HTTP_TIMEOUT,
         )
+        if response[1] in (401, 403):
+            _handle_auth_response(self.api, response[1], "commands/{commandId}", "results:write")
+        return response
 
     def checkpoint(self, stage: str = "preparing") -> bool:
         if self.cancel_event.is_set() or _local_cancel_event.is_set() or _stop_event.is_set():
@@ -2235,13 +3191,17 @@ class _CommandSession:
                 self.cancel_reason = _local_cancel_reason or "لغو محلی توسط کاربر ویندوز"
             self.cancel_requested = True
             return True
-        ok, _, data = _http_json(
+        if time.monotonic() < _auth_blocked_operations.get("commands/{commandId}", 0.0):
+            return self.cancel_requested
+        ok, code, data = _http_json(
             "GET",
             f"{self.base_url}/commands/{self.cmd_id}",
             self.agent_key,
             None,
             timeout=0.6,
         )
+        if not ok and code in (401, 403):
+            _handle_auth_response(self.api, code, "commands/{commandId}", "commands:read")
         if ok and isinstance(data, dict):
             if data.get("cancelRequested"):
                 self.cancel_requested = True
@@ -2258,6 +3218,7 @@ class _CommandSession:
 
     def finalize_cancelled(self, reason: str, result: dict | None = None, termination_ok: bool = True,
                            remaining_pids: list[int] | None = None, duration_seconds: float = 0.0) -> tuple[bool, int, dict]:
+        _cancel_screenshot_uploads(self.cmd_id)
         reason = redact_sensitive(reason or "درخواست توقف دریافت شد.", 500)
         remaining = [int(pid) for pid in (remaining_pids or [])]
         base = result or {}
@@ -2288,63 +3249,70 @@ class _CommandSession:
                                  result={**base, "terminationVerified": False, "remainingPids": remaining})
 
     def capture_stage_screenshot(self, stage: str) -> Path | None:
-        """گرفتن اسکرین‌شات، ذخیره فقط در Google Drive (یا پوشه اسکرین‌شات) و ارسال فراداده بدون بایت به D1."""
-        shots_dir = _get_screenshots_dir()
-        utc_stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        """Capture into the per-command LocalAppData queue, normalize, then upload asynchronously."""
+        if not self.cmd_id:
+            return None
         safe_stage = re.sub(r"[^A-Za-z0-9_-]", "_", stage)[:40]
-        target_name = f"{utc_stamp}_{safe_stage}.png"
-        target_path = shots_dir / target_name
-
-        saved_path: Path | None = None
+        execution_id = self.cmd_id
+        folder = SCREENSHOT_QUEUE_DIR / re.sub(r"[^A-Za-z0-9_-]", "_", execution_id)[:80]
+        folder.mkdir(parents=True, exist_ok=True)
+        raw_path = folder / f"capture_{uuid.uuid4().hex}.png"
         try:
             import app as _app
-            raw_shot = _app.take_screenshot(shots_dir)
-            raw_path = Path(raw_shot)
-            if raw_path.exists():
-                try:
-                    raw_path.replace(target_path)
-                    saved_path = target_path
-                except OSError:
-                    saved_path = raw_path
-                    target_name = raw_path.name
-        except Exception:
-            saved_path = None
-
-        if saved_path is None or not saved_path.exists():
+            captured = Path(_app.take_screenshot(folder))
+            if captured != raw_path:
+                captured.replace(raw_path)
+        except Exception as exc:
+            _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage},
+                                     "screenshot_upload_failed_permanent", f"گرفتن Screenshot مرحله {stage} ناموفق بود ({type(exc).__name__}).", "error")
             return None
-
+        if not raw_path.is_file():
+            return None
+        occurred = utc_iso_now()
+        original_size = raw_path.stat().st_size
+        digest_raw = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage,
+                                  "sha256": digest_raw, "attempts": 0},
+                                 "screenshot_captured", "Screenshot واقعی مرحله گرفته و در پوشه اجرای محلی نوشته شد.",
+                                 extra={"size": original_size, "occurredAt": occurred})
         try:
-            size_bytes = int(saved_path.stat().st_size)
-        except OSError:
-            size_bytes = 0
-
-        digest = hashlib.sha256(f"{self.cmd_id}:{stage}:{target_name}".encode("utf-8")).hexdigest()[:16]
-        artifact_id = f"art_{digest}"
-
-        # هیچ بایت تصویر یا Base64 در این payload وجود ندارد؛ فقط فراداده ارسال می‌شود
-        artifact_body = {
-            "artifactId": artifact_id,
-            "kind": "screenshot",
-            "stage": stage,
-            "name": target_name,
-            "localPath": f"ScreenShots/{target_name}",
-            "driveFileId": None,
-            "driveUrl": None,
-            "mimeType": "image/png",
-            "size": size_bytes,
-            "occurredAt": utc_iso_now(),
-        }
-        ok, _, resp = _http_json(
-            "POST",
-            f"{self.base_url}/commands/{self.cmd_id}/artifacts",
-            self.agent_key,
-            artifact_body,
-            timeout=HTTP_TIMEOUT,
-        )
-        if ok and isinstance(resp, dict) and resp.get("cancelRequested"):
-            self.cancel_requested = True
-        self.mark_progress()
-        return saved_path
+            normalized, width, height = _normalize_screenshot(raw_path)
+        except Exception as exc:
+            _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage,
+                                      "sha256": digest_raw, "attempts": 0},
+                                     "screenshot_upload_failed_permanent", f"نرمال‌سازی Screenshot ناموفق شد ({type(exc).__name__}).", "error")
+            return None
+        digest = hashlib.sha256(normalized.read_bytes()).hexdigest()
+        size = normalized.stat().st_size
+        name = f"shot_{digest[:16]}{normalized.suffix.lower()}"
+        _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage,
+                                  "sha256": digest, "attempts": 0},
+                                 "screenshot_normalized", "Screenshot برای محدودیت ۴ MiB آماده شد.",
+                                 extra={"size": size, "width": width, "height": height})
+        if size > SCREENSHOT_UPLOAD_MAX_BYTES:
+            return None
+        try:
+            cfg = load_secret() or {}
+            agent_id = str(cfg.get("agent_id") or DEFAULT_AGENT_ID)
+            queued = _enqueue_screenshot(normalized, self.cmd_id, execution_id, agent_id,
+                                         stage, name, occurred, width, height)
+            if queued.get("duplicate") and queued.get("screenshotId"):
+                _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage,
+                                          "sha256": digest, "attempts": 0}, "screenshot_upload_succeeded",
+                                         "این Screenshot با همان شناسه قبلاً Upload شده بود.",
+                                         extra={"screenshotId": queued["screenshotId"], "size": size})
+            else:
+                _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage,
+                                          "sha256": digest, "attempts": 0}, "screenshot_upload_queued",
+                                         "Screenshot به صف پایدار محلی رفت؛ هنوز موفقیت Upload نیست.",
+                                         extra={"size": size, "width": width, "height": height})
+            self.mark_progress()
+            return normalized
+        except Exception as exc:
+            _async_screenshot_report_event({"commandId": self.cmd_id, "executionId": execution_id, "stage": stage,
+                                      "sha256": digest, "attempts": 0}, "screenshot_upload_failed_permanent",
+                                     f"ثبت Screenshot در صف محلی ناموفق شد ({type(exc).__name__}).", "error")
+            return None
 
 
 def _ask_local_confirmation(session: _CommandSession, job_name: str) -> str:
@@ -2436,7 +3404,7 @@ def _fetch_and_prepare_d1_automation(
     session: _CommandSession,
     job_name: str,
 ) -> tuple[str, Path | None, Path | None, str]:
-    """دریافت کد اتوماسیون از D1 API، راستی‌آزمایی SHA-256 و نوشتن در فضای کاری موقت فرمان (بدون Git).
+    """دریافت کد اتوماسیون از API مدیریت، راستی‌آزمایی SHA-256 و نوشتن در فضای کاری موقت فرمان (بدون Git).
 
     خروجی: ``(status_tag, script_path, workspace_dir, error_reason)``
     که ``status_tag`` یکی از ``"ok"`` | ``"rejected"`` | ``"failed"`` | ``"cancelled"`` است.
@@ -2450,7 +3418,7 @@ def _fetch_and_prepare_d1_automation(
 
     session.emit_event(
         "d1_source_fetch_started",
-        f"دریافت نسخه {ver_num} اتوماسیون {job_name} از کاتالوگ Cloudflare D1…",
+        f"دریافت نسخه {ver_num} اتوماسیون {job_name} از کاتالوگ Management API…",
         level="info",
         data={"automationId": auto_id, "versionId": ver_id, "version": ver_num},
     )
@@ -2466,13 +3434,15 @@ def _fetch_and_prepare_d1_automation(
         HTTP_TIMEOUT + 0.5, "d1_source_fetch_started")
     if fetch_state == "cancelled": return "cancelled", None, None, fetch_error
     if fetch_state != "ok" or not isinstance(fetched, tuple):
-        return "failed", None, None, fetch_error or "دریافت D1 ناموفق بود."
+        return "failed", None, None, fetch_error or "دریافت از API مدیریت ناموفق بود."
     ok, code, data = fetched
+    if not ok and code in (401, 403):
+        _handle_auth_response(api, code, "automations/{automationId}/versions/{versionId}", "automations:read")
     if not session.checkpoint("d1_source_fetch_finished"):
         return "cancelled", None, None, session.cancel_reason
     if not ok:
         err_msg = _extract_error_message(data if isinstance(data, dict) else {}, code)
-        return "failed", None, None, f"دریافت کد اتوماسیون از D1 ناموفق بود ({err_msg})."
+        return "failed", None, None, f"دریافت کد اتوماسیون از API مدیریت ناموفق بود ({err_msg})."
 
     if not session.checkpoint("d1_source_fetched"):
         return "cancelled", None, None, session.cancel_reason
@@ -2494,11 +3464,11 @@ def _fetch_and_prepare_d1_automation(
             "rejected",
             None,
             None,
-            "مشخصات اتوماسیون/نسخه/نام فایل برگشتی از D1 با فرمان تطابق ندارد.",
+            "مشخصات اتوماسیون/نسخه/نام فایل برگشتی از API مدیریت با فرمان تطابق ندارد.",
         )
 
     if not isinstance(source_code, str) or not source_code.strip():
-        return "rejected", None, None, "متن کد Python برگشتی از D1 خالی یا نامعتبر است."
+        return "rejected", None, None, "متن کد Python برگشتی از API مدیریت خالی یا نامعتبر است."
 
     if not session.checkpoint("sha256_check_started"):
         return "cancelled", None, None, session.cancel_reason
@@ -2568,7 +3538,7 @@ def _fetch_and_prepare_d1_automation(
 
     session.emit_event(
         "d1_source_verified",
-        f"کد {job_name} (نسخه {ver_num}) از D1 دریافت و صحت SHA-256 ({actual_sha256[:12]}…) تأیید شد.",
+        f"کد {job_name} (نسخه {ver_num}) از Management API دریافت و صحت SHA-256 ({actual_sha256[:12]}…) تأیید شد.",
         level="info",
         data={
             "automationId": auto_id,
@@ -2677,7 +3647,7 @@ def _advance_arena_stages_from_line(session: _CommandSession, line: str) -> None
         "prompt_typed": "متن پرامپت داخل کادر چت Arena قرار گرفت.",
         "prompt_submitted": "پرامپت در Arena ارسال شد.",
         "response_waiting": "در انتظار ثبت پاسخ و پایدار شدن صفحه Arena…",
-        "result_uploaded": "اسکرین‌شات و نتیجه در پوشه Google Drive ذخیره شد.",
+        "result_uploaded": "نتیجه واقعی از Arena دریافت شد؛ Screenshot شاهد در صف Upload مدیریت قرار گرفت.",
     }
 
     detected: list[str] = []
@@ -2710,7 +3680,7 @@ def _deliver_bounded_failure_feedback(
     error_summary: str,
     stdout_lines: list[str],
 ) -> dict:
-    """در صورت شکست ``job_arena.py``، حداکثر ۳ بار تلاش می‌کند بازخورد مبتنی بر شواهد Drive ثبت کند."""
+    """در شکست ``job_arena.py``، حداکثر ۳ بار بازخورد مبتنی بر شواهد محلی و Screenshot management ثبت می‌کند."""
     joined_out = "\n".join(stdout_lines)
     if "بازخورد اجرای ناموفق به ایجنت همکار ارسال شد" in joined_out:
         return {"feedbackSent": True, "handledByJob": True, "attempts": 1}
@@ -2740,7 +3710,7 @@ def _deliver_bounded_failure_feedback(
             "failure_feedback",
             (
                 f"تلاش {attempt} از {MAX_FEEDBACK_ATTEMPTS}: از ایجنت همکار خواسته شد گزارش خطا و "
-                f"اسکرین‌شات‌های Google Drive ({'، '.join(evidence) or 'logs/ScreenShots'}) را بررسی و کد را اصلاح کند."
+                f"شواهد محلی و Screenshotهای مراحل مرتبط (فقط مواردی که Upload موفق دارند در گالری دیده می‌شوند؛ {'، '.join(evidence) or 'مراحل execution'}) را بررسی و کد را اصلاح کند."
             ),
             level="warning",
             data={
@@ -2758,7 +3728,7 @@ def _deliver_bounded_failure_feedback(
 
 
 def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
-    """اجرای کامل یک فرمان ادعاشده طبق ماشین حالت و قوانین امنیتی (D1 یا Git-legacy)."""
+    """اجرای کامل یک فرمان ادعاشده طبق ماشین حالت و قوانین امنیتی (Management API یا Git-legacy)."""
     global _active_command_id
     session = _CommandSession(api, cfg, cmd)
     cmd_id = session.cmd_id
@@ -2847,13 +3817,13 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                 level="info",
             )
 
-        # ۳. آماده‌سازی کد: مسیر جدید D1 (بدون Git) یا مسیر قدیمی همگام‌سازی مخزن
+        # ۳. آماده‌سازی کد: مسیر جدید API مدیریت (بدون Git) یا مسیر قدیمی همگام‌سازی مخزن
         run_cwd = codes_dir
         if session.cmd_type == "run_automation":
             prep_status, synced_path, cmd_workspace, prep_err = _fetch_and_prepare_d1_automation(api, session, job_name)
             if session.cancel_requested or prep_status == "cancelled":
                 if cmd_workspace is not None: shutil.rmtree(cmd_workspace, ignore_errors=True)
-                session.finalize_cancelled(session.cancel_reason or prep_err or "فرمان حین دریافت از D1 لغو شد.")
+                session.finalize_cancelled(session.cancel_reason or prep_err or "فرمان حین دریافت از API مدیریت لغو شد.")
                 with _lock: _runtime_info["last_command_status"] = "cancelled"
                 return "cancelled"
             if prep_status == "rejected":
@@ -2959,7 +3929,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
                          owned_processes=[{"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}],
                          last_message=f"Process شروع شد؛ PID {pid}")
         _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq, stage="running",
-                                    workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested)
+                                    workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested,
+                                    owned_processes=[{"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}])
 
         if not session.checkpoint("process_started"):
             stop_result = _terminate_execution_tree(cmd_id, proc, 2.0)
@@ -3055,17 +4026,13 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             idle_secs = now_mono - session.last_progress_mono
             if now_mono - last_tree_snapshot >= 0.5:
                 last_tree_snapshot = now_mono
-                old_row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
-                owned_by_pid = {int(item["pid"]): item for item in (old_row.get("owned_processes") or []) if isinstance(item, dict) and item.get("pid")}
-                if _marker_matches(pid, start_marker):
-                    owned_by_pid[pid] = {"pid": pid, "parent_pid": os.getpid(), "start_marker": start_marker}
-                    owned_by_pid.update({int(item["pid"]): item for item in _owned_descendants(pid) if item.get("start_marker") is not None})
-                owned = [item for item in owned_by_pid.values() if item.get("start_marker") is not None and _marker_matches(int(item["pid"]), item.get("start_marker"))]
-                children = [int(item["pid"]) for item in owned if int(item["pid"]) != pid]
-                update_execution(cmd_id, child_pids=children, owned_processes=owned, stage="running",
-                                 pid=pid, parent_pid=os.getpid(), process_start_marker=start_marker)
-                _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq, stage="running",
-                                            workspace_path=str(cmd_workspace or run_cwd), cancel_requested=session.cancel_requested)
+                snapshot_execution_tree(cmd_id, pid, start_marker)
+                row = next((r for r in get_execution_registry() if r.get("execution_id") == cmd_id), {})
+                _save_active_command_marker(cmd_id, pid, start_marker, job_name, session.seq,
+                                            stage=str(row.get("stage") or "running"),
+                                            workspace_path=str(cmd_workspace or run_cwd),
+                                            cancel_requested=session.cancel_requested,
+                                            owned_processes=row.get("owned_processes") or [])
 
             # پایش سبک مستقل Manager؛ job_arena.py خودش URL Arena را جداگانه می‌سنجد.
             if now_mono - session.last_network_probe >= 5.0:
@@ -3176,7 +4143,7 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
             result_meta["version"] = session.payload.get("version")
             result_meta["sourceSha256"] = session.payload.get("sourceSha256")
 
-        # ۶. تعیین وضعیت نهایی و ثبت در D1
+        # ۶. تعیین وضعیت نهایی و ثبت در Management API
         if session.cancel_requested or _stop_event.is_set():
             reason = session.cancel_reason or "توسط کاربر یا سایت مدیریت متوقف شد."
             if not termination_result or not termination_result.get("ok"):
@@ -3272,6 +4239,8 @@ def execute_claimed_command(api, cfg: dict, cmd: dict) -> str:
         return "failed"
 
     finally:
+        session.finished = True
+        _cleanup_screenshot_session(cmd_id)
         with _execution_lock:
             _process_handles.pop(cmd_id, None)
             _command_cancel_events.pop(cmd_id, None)
@@ -3315,9 +4284,14 @@ def wait_for_manager_network(api, cfg: dict) -> bool:
 
 def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
     """اگر برنامه مشغول نیست، اتصال را می‌سنجد، سپس یک فرمان را claim و اجرا می‌کند."""
+    global _auth_blocked_until
+    if time.monotonic() < _auth_blocked_until:
+        return False, "auth_backoff"
     cfg = cfg or _refresh_secret_cache(api)
     if not cfg:
         return False, "no_secret"
+    if _emergency_control_gate.is_set():
+        return True, "emergency_stop_in_progress"
 
     if not probe_network_health(cfg["base_url"], cfg["agent_key"], timeout=2.0):
         return False, "network_error"
@@ -3328,8 +4302,11 @@ def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
         if _active_command_id is not None:
             return True, "busy"
 
-    # Reset a previous request before claiming; do not clear again after active_command_id is exposed to UI.
-    clear_local_cancel()
+    # Serialize cancellation reset against emergency-control activation.
+    with _emergency_lock:
+        if _emergency_control_gate.is_set():
+            return True, "emergency_stop_in_progress"
+        clear_local_cancel()
     ok, code, data = _http_json(
         "POST",
         f"{cfg['base_url']}/commands/claim",
@@ -3338,8 +4315,17 @@ def claim_and_run_once(api, cfg: dict | None = None) -> tuple[bool, str]:
         timeout=HTTP_TIMEOUT,
     )
     if not ok:
-        if code in (401, 403):
-            return False, f"auth_{code}"
+        if code == 401:
+            _auth_blocked_until = time.monotonic() + 60.0
+            _set_manager_status(api, False, "کلید نامعتبر", "HTTP 401")
+            return False, "auth_401"
+        if code == 403:
+            _auth_blocked_until = time.monotonic() + 60.0
+            _set_manager_status(api, False, "دسترسی ناکافی", "HTTP 403")
+            if api is not None:
+                try: api.log("Claim فرمان رد شد؛ عملیات commands/claim و Scope لازم: commands:read (HTTP 403).")
+                except Exception: pass
+            return False, "auth_403"
         return False, "network_error"
 
     cmd = data.get("command")
@@ -3369,6 +4355,8 @@ def _claim_worker(api, cfg: dict) -> None:
 
 def _start_claim_worker(api, cfg: dict) -> bool:
     global _command_thread, _claim_in_progress
+    with _emergency_lock:
+        if _emergency_control_gate.is_set(): return False
     with _command_lock:
         if _claim_in_progress or (_command_thread is not None and _command_thread.is_alive()): return False
         with _lock:
@@ -3389,6 +4377,7 @@ def _worker_loop() -> None:
     backoff_idx = 0
     auth_blocked = False
     recovered_once = False
+    last_emergency_resume = 0.0
 
     while not _stop_event.is_set():
         api = _api_ref
@@ -3408,6 +4397,13 @@ def _worker_loop() -> None:
             recovered_once = True
             try:
                 recover_stale_command_if_any(api, cfg)
+            except Exception:
+                pass
+
+        if time.monotonic() - last_emergency_resume >= 5.0:
+            last_emergency_resume = time.monotonic()
+            try:
+                _resume_pending_emergency_controls(api, cfg)
             except Exception:
                 pass
 
@@ -3498,17 +4494,11 @@ def start(api=None) -> None:
             _api_ref = api
         _stop_event.clear()
 
-    # Direct Drive control is a separate optional transport. It starts only after the
-    # owner explicitly provisions a DPAPI-protected OAuth token with authorize.py.
-    try:
-        import drive_control_transport
-        drive_control_transport.start(_api_ref)
-    except Exception as exc:
-        if _api_ref is not None:
-            try:
-                _api_ref.log(f"Drive Control transport not started ({type(exc).__name__}).")
-            except Exception:
-                pass
+    # Pending screenshots resume from the LocalAppData outbox; no Google Drive write path is used.
+    _start_screenshot_upload_worker()
+
+    # All Drive transports are disabled for this production client; the authenticated
+    # Vercel Agent API is the only remote management/storage path.
 
     cfg = _refresh_secret_cache(_api_ref)
     if cfg and _api_ref is not None:
@@ -3535,12 +4525,6 @@ def stop() -> None:
     """توقف نخ‌های پس‌زمینه در زمان بسته شدن برنامه."""
     _stop_event.set()
     _wake_event.set()
-    try:
-        import drive_control_transport
-        drive_control_transport.stop(_api_ref)
-    except Exception:
-        pass
-
 
 def wake() -> None:
     """بیدار کردن فوری نخ پس‌زمینه برای ارسال آنی Heartbeat، تست اتصال و بررسی صف فرمان."""

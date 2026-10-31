@@ -68,7 +68,7 @@ def _head_hash(gitdir: Path) -> str:
 def _run_git(git_exe: str, repo: Path) -> tuple[str, int, str]:
     out = subprocess.run(
         [git_exe, "-C", str(repo), "log", "-1", "--format=%H%x1f%ct%x1f%s"],
-        capture_output=True, text=True, timeout=5, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
     ).stdout.strip()
     oid, epoch, subject = out.split("\x1f", 2)
     return oid, int(epoch), subject
@@ -173,6 +173,11 @@ def main() -> int:
         print(f"Build {oid[:7]} | latest commit {jy:04d}/{jm:02d}/{jd:02d} {moment:%H:%M} Tehran")
         return 0
     except Exception as exc:
+        # Never leave a previous launch's commit stamp masquerading as this build.
+        try:
+            stamp.unlink(missing_ok=True)
+        except OSError:
+            pass
         print(f"WARNING: Could not read Git commit metadata; embedded fallback will be used ({exc})")
         return 1
 

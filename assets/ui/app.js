@@ -28,6 +28,14 @@
 
   var CHANGELOG = [
     {
+      v: '۱.۷-۲۱', d: '۱۴۰۵/۰۸/۰۹',
+      items: [
+        'انتقال Control Plane به Vercel Management API و مهاجرت یک‌باره‌ی endpoint رمز‌شده با DPAPI.',
+        'صف پایدار Screenshot محلی، فشرده‌سازی تا سقف ۴ MiB، Upload احرازشده، retry کنترل‌شده و idempotency.',
+        'غیرفعال‌شدن نوشتن تازه‌ی Screenshot، گزارش و فایل‌های کنترل در Google Drive؛ Emergency stop حفظ شد.'
+      ]
+    },
+    {
       v: '۱.۷', d: '۱۴۰۵/۰۸/۰۲',
       items: [
         'تب تازه: «ربات تلگرام» با چهار زیرتب — تنظیمات، تست، صف پیام‌ها، راهنمای ایجنت همکار.',
@@ -38,7 +46,7 @@
         'اگر گواهی امنیتی رد شود (فیلترشکن یا آنتی‌ویروس)، ارسال یک‌بار بدون بررسی گواهی تلاش می‌شود.',
         'امکان انتخاب و کپی آزادانه‌ی متن از تمام بخش‌های صفحه (از جمله داخل تب‌ها، زیرتب‌ها و دکمه‌ها).',
         'زمان‌بندی دقیق ربات تلگرام با فیلد scheduled_at (ISO 8601 با منطقه‌ی زمانی UTC و تهران) + تعریف صریح delay نسبت به لحظه ثبت + شمارش معکوس زنده و ویرایش پیام در صف.',
-        'ماژول مستقل manager_client.py با رمزنگاری ویندوز DPAPI (manager_secret.bin)، ارسال خودکار Heartbeat هر ۳۰ ثانیه و پاسخ خودکار «سلام ایجنت مدیریت.» به تست اتصال D1 هر ۵ ثانیه.'
+        'ماژول مستقل manager_client.py با رمزنگاری ویندوز DPAPI (manager_secret.bin)، ارسال خودکار Heartbeat هر ۳۰ ثانیه و پاسخ خودکار «سلام ایجنت مدیریت.» به تست اتصال API مدیریت هر ۵ ثانیه.'
       ]
     },
     {
@@ -290,7 +298,7 @@
     $('theme-btn').title = s.theme === 'light' ? 'رفتن به تم تاریک' : 'رفتن به تم روشن';
 
     renderMode(s);
-    renderExecutionCenter((s.manager && s.manager.executions) || []);
+    renderExecutionCenter((s.manager && s.manager.executions) || [], (s.manager && s.manager.emergency_control_status) || "");
     renderStats(s);
     renderPaths(s);
     renderCodes(s);
@@ -329,9 +337,15 @@
     return min ? fa(min + ' دقیقه ' + sec + ' ثانیه') : fa(sec + ' ثانیه');
   }
 
-  function renderExecutionCenter(rows) {
+  function renderExecutionCenter(rows, emergencyStatus) {
     var box = $('execution-groups');
     if (!box) return;
+    var controlStatus = $('execution-control-status');
+    if (controlStatus) {
+      controlStatus.textContent = emergencyStatus || '';
+      controlStatus.classList.toggle('visible', !!emergencyStatus);
+      controlStatus.dataset.state = /ناموفق|نشد|خطا/.test(emergencyStatus || '') ? 'error' : (/در حال/.test(emergencyStatus || '') || /دریافت شد/.test(emergencyStatus || '') ? 'active' : 'success');
+    }
     rows = Array.isArray(rows) ? rows : [];
     var activeStatuses = ['preparing', 'waiting_confirmation', 'running', 'monitoring'];
     var active = rows.filter(function (r) { return EXECUTION_TERMINAL.indexOf(r.status) < 0 && r.status !== 'stopping'; });
@@ -622,6 +636,9 @@
         lt.textContent = 'هنوز تستی دریافت نشده (پاسخ خودکار: «سلام ایجنت مدیریت.»)';
       }
     }
+
+    var shotQueue = $('mgr-screenshot-upload-status');
+    if (shotQueue) shotQueue.textContent = mgr.screenshot_upload_message || 'هنوز Screenshotی در صف نیست.';
 
     var sp = $('mgr-secret-path');
     if (sp && mgr.secret_file) sp.textContent = mgr.secret_file;
